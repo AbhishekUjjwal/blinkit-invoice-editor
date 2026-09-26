@@ -54,29 +54,29 @@ def overwrite_area(page, rect, new_text, font_size=7):
     )
 
 def extract_metadata(doc):
-    """PDF se External Order ID, Invoice Number aur Invoice Date nikaal kar exact sequence set karta hai"""
+    def extract_metadata(doc):
+    """Blinkit/Vin invoice ke header se exact External Order ID, Invoice No aur Date read karta hai"""
     full_text = ""
     for page in doc:
         full_text += page.get_text() + "\n"
 
-    # 1. External Order ID Extraction (Sabse Pehle)
-    ext_id_match = re.search(r"(?:External\s*Order\s*(?:ID|No|#)?|PO\s*(?:No|Number)?)[:\s\-]*([A-Za-z0-9\-\/_]+)", full_text, re.IGNORECASE)
-    ext_order_id = ext_id_match.group(1).replace("/", "-") if ext_id_match else "ExtOrder"
+    # 1. External Order ID
+    ext_match = re.search(r"(?:External\s*Order\s*(?:ID|No\.?)|Channel\s*Order\s*ID|PO\s*No\.?)[\s:]+([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
+    ext_order_id = ext_match.group(1).replace("/", "-") if ext_match else "ExtOrder"
 
-    # 2. Invoice Number Extraction (Uske Baad)
-    inv_no_match = re.search(r"Invoice\s*(?:No|Number|#)?[:\s\-]*([A-Za-z0-9\-\/]+)", full_text, re.IGNORECASE)
-    invoice_no = inv_no_match.group(1).replace("/", "-") if inv_no_match else "Invoice"
+    # 2. Invoice Number
+    inv_match = re.search(r"(?:Tax\s*Invoice\s*No\.?|Invoice\s*No\.?|Invoice\s*Number)[\s:]+([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
+    invoice_no = inv_match.group(1).replace("/", "-") if inv_match else "Invoice"
 
-    # 3. Invoice Date Extraction (Aakhiri Me)
-    date_match = re.search(r"(?:Invoice\s*Date|Date)[:\s\-]*([0-9]{1,4}[\.\-\/][0-9]{1,2}[\.\-\/][0-9]{2,4})", full_text, re.IGNORECASE)
+    # 3. Invoice Date
+    date_match = re.search(r"(?:Invoice\s*Date|Dated?|Date)[\s:]+([0-3]?[0-9][\.\-/][0-1]?[0-9][\.\-/][1-2][0-9]{3})", full_text, re.IGNORECASE)
     invoice_date = date_match.group(1).replace("/", "-").replace(".", "-") if date_match else "Date"
 
-    # Clean unwanted characters for valid filename
+    # Clean characters
     clean_ext = re.sub(r'[^A-Za-z0-9\-_]', '', ext_order_id)
     clean_inv = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_no)
     clean_date = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_date)
 
-    # Naya sequence: ExternalID_InvoiceNo_InvoiceDate.pdf
     return f"{clean_ext}_{clean_inv}_{clean_date}.pdf"
 
 def process_universal_blinkit_invoice(pdf_bytes):
