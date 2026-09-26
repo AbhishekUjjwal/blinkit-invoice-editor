@@ -43,6 +43,7 @@ st.markdown("""
 uploaded_invoice = st.file_uploader("", type=["pdf"])
 
 def overwrite_area(page, rect, new_text, font_size=7):
+    """Purane text ko white box se mask karke exact coordinate par naya text likhta hai"""
     pad_rect = fitz.Rect(rect.x0 - 1.5, rect.y0 - 0.5, rect.x1 + 1.5, rect.y1 + 0.5)
     page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
     page.insert_text(
@@ -58,6 +59,7 @@ def extract_metadata(doc):
     for page in doc:
         full_text += page.get_text() + "\n"
 
+    # 1. Extern Order No Target
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
@@ -71,9 +73,11 @@ def extract_metadata(doc):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
+    # 2. Invoice No Target
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "Invoice"
 
+    # 3. Invoice Date Target
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -98,24 +102,10 @@ def process_universal_blinkit_invoice(pdf_bytes):
 
     for page in doc:
         words = page.get_text("words")
-
-        qty_col_x = None
-        price_col_x = None
-
-        for w in words:
-            text = w[4].strip()
-            if text.lower() == "qty":
-                qty_col_x = (w[0], w[2])
-            elif "unit" in text.lower() or "price" in text.lower():
-                if not price_col_x:
-                    price_col_x = (w[0], w[2])
-
-        qty_x_range = (qty_col_x[0] - 15, qty_col_x[1] + 25) if qty_col_x else (330, 390)
-        price_x_range = (price_col_x[0] - 15, price_col_x[1] + 35) if price_col_x else (390, 460)
-
         blocks = page.get_text("blocks")
-        detected_rows = []
 
+        # Dispo aur Comfit rows ki boundaries nikalna
+        detected_rows = []
         for b in blocks:
             b_text = b[4].upper()
             factor = None
@@ -128,9 +118,10 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 detected_rows.append({
                     "factor": factor,
                     "y_top": b[1] - 4,
-                    "y_bottom": b[3] + 4
+                    "y_bottom": b[3] + 6
                 })
 
+        # Har row ke elements ko process karna
         for row in detected_rows:
             factor = row["factor"]
             y0, y1 = row["y_top"], row["y_bottom"]
@@ -139,26 +130,34 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 w_rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 w_val = w[4].replace(",", "").strip()
 
+                # Row ke vertical bounds ke andar
                 if y0 <= w_rect.y0 and w_rect.y1 <= y1 + 8:
-                    if qty_x_range[0] <= w_rect.x0 <= qty_x_range[1]:
+                    x_pos = w_rect.x0
+
+                    # 1. Quantity column (X coordinate roughly 300 se 390 ke beech)
+                    if 300 <= x_pos <= 390:
                         if w_val.isdigit() and int(w_val) >= factor:
                             orig_qty = int(w_val)
                             new_qty = orig_qty // factor
                             overwrite_area(page, w_rect, f"{new_qty}")
 
-                    elif price_x_range[0] <= w_rect.x0 <= price_x_range[1]:
-                        if re.match(r"^\d+(\.\d+)?$", w_val):
+                    # 2. Unit Price column (X coordinate 390 se 470 ke beech)
+                    elif 390 <= x_pos <= 475:
+                        # Sirf unit price decimal match karega (Discount 0.00 ko touch nahi karega)
+                        if re.match(r"^\d+\.\d{2}$", w_val):
                             orig_price = float(w_val)
-                            if orig_price > 0:
+                            if orig_price > 0.00:
                                 new_price = round(orig_price * factor, 2)
                                 overwrite_area(page, w_rect, f"{new_price:.2f}")
 
+        # 3. UOM Replacements
         for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
             for inst in page.search_for(target):
                 overwrite_area(page, inst, "UOM-BOX")
 
+        # Niche toot kar bacha hua 'S' white-out karna
         for s_inst in page.search_for("S"):
-            if 150 <= s_inst.x0 <= 250:
+            if 140 <= s_inst.x0 <= 260:
                 page.draw_rect(s_inst, color=None, fill=(1, 1, 1))
 
     out_buffer = io.BytesIO()
