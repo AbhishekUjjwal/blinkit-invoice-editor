@@ -36,7 +36,7 @@ st.markdown("""
     <div class="hero-container">
         <div class="logo-badge"><span class="logo-icon">⚡</span></div>
         <div class="brand-title">Blinkit Invoice Gateway</div>
-        <div class="brand-sub">Qty & Unit Price Automation</div>
+        <div class="brand-sub">Universal Dynamic Reconciliation Engine</div>
     </div>
 """, unsafe_allow_html=True)
 
@@ -96,12 +96,10 @@ def extract_metadata(doc):
 def process_universal_blinkit_invoice(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     download_filename = extract_metadata(doc)
-    change_logs = []
 
     for page in doc:
-        words = page.get_text("words")  # (x0, y0, x1, y1, word, ...)
+        words = page.get_text("words")
         
-        # 1. Header line se exact 'Qty' aur 'Unit Price' column ke horizontal borders (X-axis) pakdo
         qty_box = None
         price_box = None
 
@@ -113,30 +111,25 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 if not price_box:
                     price_box = (w[0] - 15, w[2] + 40)
 
-        # Agar header se exact na mile to layout default
         if not qty_box:
             qty_box = (320, 390)
         if not price_box:
             price_box = (390, 480)
 
-        # 2. Rows identify karo: Jisme 'DISPO' ya 'COMFIT' likha ho
         product_rows = []
         for w in words:
             text = w[4].upper()
             if "DISPO" in text:
-                product_rows.append({"name": "DISPO", "factor": 50, "y": (w[1] + w[3]) / 2})
+                product_rows.append({"factor": 50, "y": (w[1] + w[3]) / 2})
             elif "COMFIT" in text:
-                product_rows.append({"name": "COMFIT", "factor": 25, "y": (w[1] + w[3]) / 2})
+                product_rows.append({"factor": 25, "y": (w[1] + w[3]) / 2})
 
-        # 3. Har product row ke samne Qty aur Unit Price ko badlo
         for prod in product_rows:
             factor = prod["factor"]
             row_y = prod["y"]
-
-            # Us row ke vertical band (+- 25pt) ke saare words
             row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - row_y) <= 25]
 
-            # A. QTY Update (Dispo ÷50, Comfit ÷25)
+            # Qty update
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -147,40 +140,37 @@ def process_universal_blinkit_invoice(pdf_bytes):
                         if orig_q >= factor:
                             new_q = orig_q // factor
                             overwrite_area(page, rect, f"{new_q}")
-                            change_logs.append(f"{prod['name']} Qty: {orig_q} ÷ {factor} = {new_q}")
 
-            # B. UNIT PRICE Update (Dispo ×50, Comfit ×25)
+            # Unit Price update
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 rect = fitz.Rect(w[0], w[1], w[2], w[3])
 
                 if price_box[0] <= w[0] <= price_box[1]:
-                    # Match decimal number (jaise 1.64, 4.63, 10.45)
                     if re.match(r"^\d+\.\d{2}$", val):
                         orig_p = float(val)
                         if orig_p > 0.00:
                             new_p = round(orig_p * factor, 2)
                             overwrite_area(page, rect, f"{new_p:.2f}")
-                            change_logs.append(f"{prod['name']} Unit Price: {orig_p} × {factor} = {new_p:.2f}")
+
+        # UOM Updates
+        for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
+            for inst in page.search_for(target):
+                overwrite_area(page, inst, "UOM-BOX")
+
+        for s_inst in page.search_for("S"):
+            if 140 <= s_inst.x0 <= 260:
+                page.draw_rect(s_inst, color=None, fill=(1, 1, 1))
 
     out_buffer = io.BytesIO()
     doc.save(out_buffer)
     doc.close()
     out_buffer.seek(0)
-    return out_buffer, download_filename, change_logs
+    return out_buffer, download_filename
 
 if uploaded_invoice:
-    st.info("Invoice analyze ho raha hai...")
     try:
-        updated_pdf_buffer, out_filename, logs = process_universal_blinkit_invoice(uploaded_invoice.read())
-        
-        if logs:
-            st.success("✅ Updates Applied:")
-            for l in sorted(list(set(logs))):
-                st.write(f"• {l}")
-        else:
-            st.warning("⚠️ Koi target row detect nahi hui.")
-
+        updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(uploaded_invoice.read())
         st.download_button(
             label=f"📥 Download {out_filename}",
             data=updated_pdf_buffer,
