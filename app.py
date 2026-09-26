@@ -36,15 +36,15 @@ st.markdown("""
     <div class="hero-container">
         <div class="logo-badge"><span class="logo-icon">⚡</span></div>
         <div class="brand-title">Blinkit Invoice Gateway</div>
-        <div class="brand-sub">Universal Dynamic Reconciliation Engine</div>
+        <div class="brand-sub">Qty & Unit Price Automation</div>
     </div>
 """, unsafe_allow_html=True)
 
 uploaded_invoice = st.file_uploader("", type=["pdf"])
 
 def overwrite_area(page, rect, new_text, font_size=7):
-    """Purane text ko white box se mask karke exact coordinate par naya text likhta hai"""
-    pad_rect = fitz.Rect(rect.x0 - 1.5, rect.y0 - 0.5, rect.x1 + 1.5, rect.y1 + 0.5)
+    """Purane text ko white mask karke naya value likhta hai"""
+    pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
     page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
     page.insert_text(
         (rect.x0, rect.y1 - 1.2),
@@ -59,7 +59,6 @@ def extract_metadata(doc):
     for page in doc:
         full_text += page.get_text() + "\n"
 
-    # 1. Extern Order No
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
@@ -73,11 +72,9 @@ def extract_metadata(doc):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
-    # 2. Invoice No
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "Invoice"
 
-    # 3. Invoice Date
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -99,75 +96,91 @@ def extract_metadata(doc):
 def process_universal_blinkit_invoice(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     download_filename = extract_metadata(doc)
+    change_logs = []
 
     for page in doc:
-        words = page.get_text("words")
-        blocks = page.get_text("blocks")
+        words = page.get_text("words")  # (x0, y0, x1, y1, word, ...)
+        
+        # 1. Header line se exact 'Qty' aur 'Unit Price' column ke horizontal borders (X-axis) pakdo
+        qty_box = None
+        price_box = None
 
-        # Original simple logic: Block detection for Dispo & Comfit
-        detected_rows = []
-        for b in blocks:
-            b_text = b[4].upper()
-            factor = None
-            if "DISPO" in b_text:
-                factor = 50
-            elif "COMFIT" in b_text:
-                factor = 25
+        for w in words:
+            w_txt = w[4].strip().lower()
+            if w_txt == "qty":
+                qty_box = (w[0] - 15, w[2] + 25)
+            elif w_txt == "price" or "unit" in w_txt:
+                if not price_box:
+                    price_box = (w[0] - 15, w[2] + 40)
 
-            if factor:
-                detected_rows.append({
-                    "factor": factor,
-                    "y_top": b[1] - 4,
-                    "y_bottom": b[3] + 8
-                })
+        # Agar header se exact na mile to layout default
+        if not qty_box:
+            qty_box = (320, 390)
+        if not price_box:
+            price_box = (390, 480)
 
-        for row in detected_rows:
-            factor = row["factor"]
-            y0, y1 = row["y_top"], row["y_bottom"]
+        # 2. Rows identify karo: Jisme 'DISPO' ya 'COMFIT' likha ho
+        product_rows = []
+        for w in words:
+            text = w[4].upper()
+            if "DISPO" in text:
+                product_rows.append({"name": "DISPO", "factor": 50, "y": (w[1] + w[3]) / 2})
+            elif "COMFIT" in text:
+                product_rows.append({"name": "COMFIT", "factor": 25, "y": (w[1] + w[3]) / 2})
 
-            for w in words:
-                w_rect = fitz.Rect(w[0], w[1], w[2], w[3])
-                w_val = w[4].replace(",", "").strip()
+        # 3. Har product row ke samne Qty aur Unit Price ko badlo
+        for prod in product_rows:
+            factor = prod["factor"]
+            row_y = prod["y"]
 
-                # Row vertical boundary ke andar
-                if y0 <= w_rect.y0 and w_rect.y1 <= y1:
-                    x0 = w_rect.x0
+            # Us row ke vertical band (+- 25pt) ke saare words
+            row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - row_y) <= 25]
 
-                    # Qty column range (Original simple range)
-                    if 320 <= x0 <= 390:
-                        if w_val.isdigit() and int(w_val) >= factor:
-                            orig_qty = int(w_val)
-                            new_qty = orig_qty // factor
-                            overwrite_area(page, w_rect, f"{new_qty}")
+            # A. QTY Update (Dispo ÷50, Comfit ÷25)
+            for w in row_words:
+                val = w[4].replace(",", "").strip()
+                rect = fitz.Rect(w[0], w[1], w[2], w[3])
 
-                    # Unit Price column range (Original simple range)
-                    elif 390 <= x0 <= 465:
-                        if re.match(r"^\d+(\.\d+)?$", w_val):
-                            orig_price = float(w_val)
-                            if orig_price > 0.00:
-                                new_price = round(orig_price * factor, 2)
-                                overwrite_area(page, w_rect, f"{new_price:.2f}")
+                if qty_box[0] <= w[0] <= qty_box[1]:
+                    if val.isdigit() and len(val) != 8:
+                        orig_q = int(val)
+                        if orig_q >= factor:
+                            new_q = orig_q // factor
+                            overwrite_area(page, rect, f"{new_q}")
+                            change_logs.append(f"{prod['name']} Qty: {orig_q} ÷ {factor} = {new_q}")
 
-        # UOM Updates
-        for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
-            for inst in page.search_for(target):
-                overwrite_area(page, inst, "UOM-BOX")
+            # B. UNIT PRICE Update (Dispo ×50, Comfit ×25)
+            for w in row_words:
+                val = w[4].replace(",", "").strip()
+                rect = fitz.Rect(w[0], w[1], w[2], w[3])
 
-        for s_inst in page.search_for("S"):
-            if 140 <= s_inst.x0 <= 260:
-                page.draw_rect(s_inst, color=None, fill=(1, 1, 1))
+                if price_box[0] <= w[0] <= price_box[1]:
+                    # Match decimal number (jaise 1.64, 4.63, 10.45)
+                    if re.match(r"^\d+\.\d{2}$", val):
+                        orig_p = float(val)
+                        if orig_p > 0.00:
+                            new_p = round(orig_p * factor, 2)
+                            overwrite_area(page, rect, f"{new_p:.2f}")
+                            change_logs.append(f"{prod['name']} Unit Price: {orig_p} × {factor} = {new_p:.2f}")
 
     out_buffer = io.BytesIO()
     doc.save(out_buffer)
     doc.close()
     out_buffer.seek(0)
-    return out_buffer, download_filename
+    return out_buffer, download_filename, change_logs
 
 if uploaded_invoice:
     st.info("Invoice analyze ho raha hai...")
     try:
-        updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(uploaded_invoice.read())
-        st.success(f"File ready: {out_filename}")
+        updated_pdf_buffer, out_filename, logs = process_universal_blinkit_invoice(uploaded_invoice.read())
+        
+        if logs:
+            st.success("✅ Updates Applied:")
+            for l in sorted(list(set(logs))):
+                st.write(f"• {l}")
+        else:
+            st.warning("⚠️ Koi target row detect nahi hui.")
+
         st.download_button(
             label=f"📥 Download {out_filename}",
             data=updated_pdf_buffer,
