@@ -2,6 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 import re
 import io
+import zipfile
 from datetime import datetime
 
 st.set_page_config(page_title="Invoice Operations Suite", page_icon="📑", layout="centered")
@@ -35,12 +36,13 @@ st.markdown("""
     </style>
     <div class="hero-container">
         <div class="logo-badge"><span class="logo-icon">⚡</span></div>
-        <div class="brand-title">Blinkit Invoice Gateway</div>
-        <div class="brand-sub">Universal Dynamic Reconciliation Engine</div>
+        <div class="brand-title">Blinkit Bulk Invoice Gateway</div>
+        <div class="brand-sub">Universal Dynamic Reconciliation Engine (Batch Mode)</div>
     </div>
 """, unsafe_allow_html=True)
 
-uploaded_invoice = st.file_uploader("", type=["pdf"])
+# Multiple files upload support
+uploaded_invoices = st.file_uploader("Upload Blinkit Invoices (Single ya Multiple)", type=["pdf"], accept_multiple_files=True)
 
 def overwrite_area(page, rect, new_text, font_size=7):
     """Purane text ko white mask karke naya value likhta hai"""
@@ -150,7 +152,7 @@ def process_universal_blinkit_invoice(pdf_bytes):
                     if re.match(r"^\d+\.\d{2}$", val):
                         orig_p = float(val)
                         if orig_p > 0.00:
-                            new_p = round(orig_p * factor, 2)
+                            new_p = round(orig_price if 'orig_price' in locals() else orig_p * factor, 2)
                             overwrite_area(page, rect, f"{new_p:.2f}")
 
         # UOM Updates
@@ -168,14 +170,41 @@ def process_universal_blinkit_invoice(pdf_bytes):
     out_buffer.seek(0)
     return out_buffer, download_filename
 
-if uploaded_invoice:
-    try:
-        updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(uploaded_invoice.read())
+if uploaded_invoices:
+    # 1 file ho ya bulk, dono handle karega
+    if len(uploaded_invoices) == 1:
+        file = uploaded_invoices[0]
+        try:
+            updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(file.read())
+            st.download_button(
+                label=f"📥 Download {out_filename}",
+                data=updated_pdf_buffer,
+                file_name=out_filename,
+                mime="application/pdf"
+            )
+        except Exception as e:
+            st.error(f"Error processing {file.name}: {str(e)}")
+    else:
+        # Multiple files: Process all & bundle into ZIP
+        zip_buffer = io.BytesIO()
+        processed_files = []
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for file in uploaded_invoices:
+                try:
+                    pdf_buf, out_fname = process_universal_blinkit_invoice(file.read())
+                    # Avoid duplicate filename inside zip
+                    if out_fname in processed_files:
+                        out_fname = f"{len(processed_files)+1}_{out_fname}"
+                    zip_file.writestr(out_fname, pdf_buf.getvalue())
+                    processed_files.append(out_fname)
+                except Exception as e:
+                    st.error(f"Error in {file.name}: {str(e)}")
+
+        zip_buffer.seek(0)
         st.download_button(
-            label=f"📥 Download {out_filename}",
-            data=updated_pdf_buffer,
-            file_name=out_filename,
-            mime="application/pdf"
+            label=f"📦 Download All Invoices ({len(processed_files)} Files - ZIP)",
+            data=zip_buffer,
+            file_name=f"Blinkit_Processed_Invoices_{datetime.now().strftime('%d-%m-%Y')}.zip",
+            mime="application/zip"
         )
-    except Exception as e:
-        st.error(f"Processing Error: {str(e)}")
