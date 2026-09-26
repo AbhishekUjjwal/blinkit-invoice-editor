@@ -47,34 +47,26 @@ st.markdown("""
     <div class="hero-container">
         <div class="logo-badge"><span class="logo-icon">⚡</span></div>
         <div class="brand-title">Blinkit Operations Gateway</div>
-        <div class="brand-sub">Reconciliation Engine & e-Invoice JSON Center</div>
+        <div class="brand-sub">PDF Editor & Edited Invoice to e-Invoice JSON</div>
     </div>
 """, unsafe_allow_html=True)
 
-# ----------------- COMMON HELPER FUNCTIONS -----------------
+# ----------------- HELPER FUNCTIONS -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
     page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
-    page.insert_text(
-        (rect.x0, rect.y1 - 1.2),
-        str(new_text),
-        fontsize=font_size,
-        fontname="helv",
-        color=(0, 0, 0)
-    )
+    page.insert_text((rect.x0, rect.y1 - 1.2), str(new_text), fontsize=font_size, fontname="helv", color=(0, 0, 0))
 
 def extract_metadata(full_text):
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
         ext_order_id = "".join(ext_match.group(1).split())
-
     if not ext_order_id:
         digits_match = re.findall(r"\b(49\d{8,14}|5\d{8,14}|\d{12,18})\b", full_text)
         if digits_match:
             ext_order_id = digits_match[0]
-
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
@@ -98,9 +90,9 @@ def extract_metadata(full_text):
     clean_ext = re.sub(r'[^A-Za-z0-9\-_]', '', ext_order_id)
     clean_inv = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_no)
     clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
-
     return f"{clean_ext}_{clean_inv}_{clean_dt}.pdf", invoice_no, std_date_for_json
 
+# TAB 1 LOGIC: ORIGINAL INVOICE EDIT (÷50, ×50, ÷25, ×25)
 def process_universal_blinkit_invoice(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     full_text = ""
@@ -140,7 +132,6 @@ def process_universal_blinkit_invoice(pdf_bytes):
             row_y = prod["y"]
             row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - row_y) <= 25]
 
-            # Qty update
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -151,7 +142,6 @@ def process_universal_blinkit_invoice(pdf_bytes):
                             new_q = orig_q // factor
                             overwrite_area(page, rect, f"{new_q}")
 
-            # Unit Price update
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -176,7 +166,16 @@ def process_universal_blinkit_invoice(pdf_bytes):
     out_buffer.seek(0)
     return out_buffer, download_filename
 
-def build_einvoice_json_object(full_text, invoice_no, doc_date, line_items):
+# TAB 2 LOGIC: EDITED INVOICE SE DIRECT VALUES UTHAKAR JSON BANANA
+def build_einvoice_from_edited_pdf(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    full_text = ""
+    for p in doc:
+        full_text += p.get_text() + "\n"
+
+    _, invoice_no, doc_date = extract_metadata(full_text)
+
+    # Buyer & Seller details from text
     gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
     seller_gstin = gstins[0] if len(gstins) > 0 else "09AAFCG9846E1Z9"
     buyer_gstin = gstins[1] if len(gstins) > 1 else seller_gstin
@@ -189,6 +188,69 @@ def build_einvoice_json_object(full_text, invoice_no, doc_date, line_items):
     buyer_state_code = buyer_gstin[:2]
     buyer_name = "BLINK COMMERCE PRIVATE LIMITED"
 
+    # Columns position
+    line_items = []
+    for page in doc:
+        words = page.get_text("words")
+        qty_box = None
+        price_box = None
+
+        for w in words:
+            w_txt = w[4].strip().lower()
+            if w_txt == "qty":
+                qty_box = (w[0] - 15, w[2] + 25)
+            elif w_txt == "price" or "unit" in w_txt:
+                if not price_box:
+                    price_box = (w[0] - 15, w[2] + 40)
+
+        if not qty_box:
+            qty_box = (320, 390)
+        if not price_box:
+            price_box = (390, 480)
+
+        product_rows = []
+        for w in words:
+            text = w[4].upper()
+            if "DISPO" in text:
+                product_rows.append({"desc": "DGNW50 Dispo Guard Face Mask", "y": (w[1] + w[3]) / 2})
+            elif "COMFIT" in text:
+                product_rows.append({"desc": "C3DFM Comfit 3D Face Mask", "y": (w[1] + w[3]) / 2})
+
+        for prod in product_rows:
+            row_y = prod["y"]
+            row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - row_y) <= 25]
+
+            final_q = None
+            final_p = None
+
+            # Seedha edited PDF ki printed Qty uthayega
+            for w in row_words:
+                val = w[4].replace(",", "").strip()
+                if qty_box[0] <= w[0] <= qty_box[1]:
+                    if val.isdigit() and len(val) != 8:
+                        final_q = int(val)
+
+            # Seedha edited PDF ki printed Unit Price uthayega
+            for w in row_words:
+                val = w[4].replace(",", "").strip()
+                if price_box[0] <= w[0] <= price_box[1]:
+                    if re.match(r"^\d+\.\d{2}$", val):
+                        val_float = float(val)
+                        if val_float > 0.00:
+                            final_p = val_float
+
+            if final_q and final_p:
+                line_items.append({
+                    "desc": prod["desc"],
+                    "hsn": "63079091",
+                    "qty": final_q,
+                    "unit_price": final_p,
+                    "gst_rate": 5.0
+                })
+
+    doc.close()
+
+    # Calculate item values
     item_list = []
     tot_taxable = 0.0
     tot_cgst = 0.0
@@ -240,7 +302,7 @@ def build_einvoice_json_object(full_text, invoice_no, doc_date, line_items):
 
     total_inv_val = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
 
-    return {
+    payload = {
         "Version": "1.03",
         "TranDtls": {
             "TaxSch": "GST",
@@ -285,102 +347,28 @@ def build_einvoice_json_object(full_text, invoice_no, doc_date, line_items):
             "TotInvVal": total_inv_val
         }
     }
-
-def process_pdf_for_json(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    full_text = ""
-    for p in doc:
-        full_text += p.get_text() + "\n"
-
-    _, invoice_no, std_date = extract_metadata(full_text)
-    extracted_items = []
-
-    for page in doc:
-        words = page.get_text("words")
-        qty_box = None
-        price_box = None
-
-        for w in words:
-            w_txt = w[4].strip().lower()
-            if w_txt == "qty":
-                qty_box = (w[0] - 15, w[2] + 25)
-            elif w_txt == "price" or "unit" in w_txt:
-                if not price_box:
-                    price_box = (w[0] - 15, w[2] + 40)
-
-        if not qty_box:
-            qty_box = (320, 390)
-        if not price_box:
-            price_box = (390, 480)
-
-        product_rows = []
-        for w in words:
-            text = w[4].upper()
-            if "DISPO" in text:
-                product_rows.append({"type": "DISPO", "factor": 50, "y": (w[1] + w[3]) / 2, "desc": "DGNW50 Dispo Guard Face Mask"})
-            elif "COMFIT" in text:
-                product_rows.append({"type": "COMFIT", "factor": 25, "y": (w[1] + w[3]) / 2, "desc": "C3DFM Comfit 3D Face Mask"})
-
-        for prod in product_rows:
-            factor = prod["factor"]
-            row_y = prod["y"]
-            row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - row_y) <= 25]
-
-            final_q = None
-            final_p = None
-
-            for w in row_words:
-                val = w[4].replace(",", "").strip()
-                if qty_box[0] <= w[0] <= qty_box[1]:
-                    if val.isdigit() and len(val) != 8:
-                        orig_q = int(val)
-                        if orig_q >= factor:
-                            final_q = orig_q // factor
-
-                if price_box[0] <= w[0] <= price_box[1]:
-                    if re.match(r"^\d+\.\d{2}$", val):
-                        orig_p = float(val)
-                        if orig_p > 0.00:
-                            final_p = round(orig_p * factor, 2)
-
-            if final_q and final_p:
-                extracted_items.append({
-                    "desc": prod["desc"],
-                    "hsn": "63079091",
-                    "qty": final_q,
-                    "unit_price": final_p,
-                    "gst_rate": 5.0
-                })
-
-    doc.close()
-    return build_einvoice_json_object(full_text, invoice_no, std_date, extracted_items), invoice_no
+    return payload, invoice_no
 
 # ----------------- TABS SETUP -----------------
 
-tab1, tab2 = st.tabs(["📑 Invoice PDF Reconcile", "🧾 Generate e-Invoice JSON"])
+tab1, tab2 = st.tabs(["📑 Step 1: Edit Blinkit Invoice", "🧾 Step 2: Create e-Invoice JSON"])
 
-# TAB 1: PDF PROCESSING & ZIP
+# TAB 1: Edit original invoices
 with tab1:
-    st.subheader("Invoice PDF Reconciliation (Single / Bulk)")
-    uploaded_invoices = st.file_uploader("Upload Invoices for Editing", type=["pdf"], accept_multiple_files=True, key="pdf_tab_uploader")
+    st.subheader("Invoice Editing (Qty & Price Fix)")
+    uploaded_invoices = st.file_uploader("Original Invoices Upload Karein (Single / Bulk)", type=["pdf"], accept_multiple_files=True, key="pdf_tab_uploader")
 
     if uploaded_invoices:
         if len(uploaded_invoices) == 1:
             file = uploaded_invoices[0]
             try:
                 updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(file.read())
-                st.download_button(
-                    label=f"📥 Download {out_filename}",
-                    data=updated_pdf_buffer,
-                    file_name=out_filename,
-                    mime="application/pdf"
-                )
+                st.download_button(label=f"📥 Download Edited PDF ({out_filename})", data=updated_pdf_buffer, file_name=out_filename, mime="application/pdf")
             except Exception as e:
-                st.error(f"Error processing {file.name}: {str(e)}")
+                st.error(f"Error: {str(e)}")
         else:
             zip_buffer = io.BytesIO()
             processed_files = []
-
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                 for file in uploaded_invoices:
                     try:
@@ -391,46 +379,30 @@ with tab1:
                         processed_files.append(out_fname)
                     except Exception as e:
                         st.error(f"Error in {file.name}: {str(e)}")
-
             zip_buffer.seek(0)
-            st.download_button(
-                label=f"📦 Download All Invoices ({len(processed_files)} Files - ZIP)",
-                data=zip_buffer,
-                file_name=f"Blinkit_Processed_Invoices_{datetime.now().strftime('%d-%m-%Y')}.zip",
-                mime="application/zip"
-            )
+            st.download_button(label=f"📦 Download All Edited Invoices ({len(processed_files)} Files - ZIP)", data=zip_buffer, file_name=f"Blinkit_Edited_Invoices_{datetime.now().strftime('%d-%m-%Y')}.zip", mime="application/zip")
 
-# TAB 2: E-INVOICE JSON GENERATION
+# TAB 2: Upload EDITED invoices to create government ready JSON
 with tab2:
-    st.subheader("e-Invoice Government JSON Portal Upload")
-    uploaded_json_invoices = st.file_uploader("Upload Invoices for JSON Generator", type=["pdf"], accept_multiple_files=True, key="json_tab_uploader")
+    st.subheader("Edited Invoice Upload Karein aur e-Invoice JSON Payein")
+    st.info("💡 Yahan aap apni edit/change ki hui invoices upload kar sakte hain, portal ready JSON direct generate ho jayega.")
+    uploaded_edited_invoices = st.file_uploader("Edited Invoices Upload Karein (Single / Bulk)", type=["pdf"], accept_multiple_files=True, key="edited_tab_uploader")
 
-    if uploaded_json_invoices:
-        if len(uploaded_json_invoices) == 1:
-            file = uploaded_json_invoices[0]
+    if uploaded_edited_invoices:
+        if len(uploaded_edited_invoices) == 1:
+            file = uploaded_edited_invoices[0]
             try:
-                einv_json, inv_num = process_pdf_for_json(file.read())
-                st.download_button(
-                    label=f"🧾 Download e-Invoice JSON ({inv_num})",
-                    data=json.dumps(einv_json, indent=4),
-                    file_name=f"{inv_num}_eInvoice.json",
-                    mime="application/json"
-                )
+                einv_json, inv_num = build_einvoice_from_edited_pdf(file.read())
+                st.download_button(label=f"🧾 Download e-Invoice JSON ({inv_num})", data=json.dumps(einv_json, indent=4), file_name=f"{inv_num}_eInvoice.json", mime="application/json")
             except Exception as e:
                 st.error(f"Error: {str(e)}")
         else:
             batch_list = []
-            for file in uploaded_json_invoices:
+            for file in uploaded_edited_invoices:
                 try:
-                    einv_json, _ = process_pdf_for_json(file.read())
+                    einv_json, _ = build_einvoice_from_edited_pdf(file.read())
                     batch_list.append(einv_json)
                 except Exception as e:
                     st.error(f"Error in {file.name}: {str(e)}")
-
             if batch_list:
-                st.download_button(
-                    label=f"🧾 Download Bulk e-Invoice JSON ({len(batch_list)} Invoices)",
-                    data=json.dumps(batch_list, indent=4),
-                    file_name=f"Bulk_eInvoice_NIC_{datetime.now().strftime('%d-%m-%Y')}.json",
-                    mime="application/json"
-                )
+                st.download_button(label=f"🧾 Download Bulk e-Invoice JSON ({len(batch_list)} Invoices)", data=json.dumps(batch_list, indent=4), file_name=f"Bulk_eInvoice_NIC_{datetime.now().strftime('%d-%m-%Y')}.json", mime="application/json")
