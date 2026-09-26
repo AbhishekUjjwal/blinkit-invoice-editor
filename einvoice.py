@@ -47,7 +47,7 @@ st.markdown("""
     <div class="hero-container">
         <div class="logo-badge"><span class="logo-icon">⚡</span></div>
         <div class="brand-title">Blinkit Operations Gateway</div>
-        <div class="brand-sub">PDF Editor & Edited Invoice to e-Invoice JSON</div>
+        <div class="brand-sub">PDF Editor & e-Invoice JSON Center</div>
     </div>
 """, unsafe_allow_html=True)
 
@@ -92,7 +92,6 @@ def extract_metadata(full_text):
     clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
     return f"{clean_ext}_{clean_inv}_{clean_dt}.pdf", invoice_no, std_date_for_json
 
-# TAB 1 LOGIC: ORIGINAL INVOICE EDIT (÷50, ×50, ÷25, ×25)
 def process_universal_blinkit_invoice(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     full_text = ""
@@ -166,7 +165,6 @@ def process_universal_blinkit_invoice(pdf_bytes):
     out_buffer.seek(0)
     return out_buffer, download_filename
 
-# TAB 2 LOGIC: EDITED INVOICE SE DIRECT VALUES UTHAKAR JSON BANANA
 def build_einvoice_from_edited_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     full_text = ""
@@ -175,7 +173,6 @@ def build_einvoice_from_edited_pdf(pdf_bytes):
 
     _, invoice_no, doc_date = extract_metadata(full_text)
 
-    # Buyer & Seller details from text
     gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
     seller_gstin = gstins[0] if len(gstins) > 0 else "09AAFCG9846E1Z9"
     buyer_gstin = gstins[1] if len(gstins) > 1 else seller_gstin
@@ -188,7 +185,6 @@ def build_einvoice_from_edited_pdf(pdf_bytes):
     buyer_state_code = buyer_gstin[:2]
     buyer_name = "BLINK COMMERCE PRIVATE LIMITED"
 
-    # Columns position
     line_items = []
     for page in doc:
         words = page.get_text("words")
@@ -223,14 +219,12 @@ def build_einvoice_from_edited_pdf(pdf_bytes):
             final_q = None
             final_p = None
 
-            # Seedha edited PDF ki printed Qty uthayega
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 if qty_box[0] <= w[0] <= qty_box[1]:
                     if val.isdigit() and len(val) != 8:
                         final_q = int(val)
 
-            # Seedha edited PDF ki printed Unit Price uthayega
             for w in row_words:
                 val = w[4].replace(",", "").strip()
                 if price_box[0] <= w[0] <= price_box[1]:
@@ -250,7 +244,6 @@ def build_einvoice_from_edited_pdf(pdf_bytes):
 
     doc.close()
 
-    # Calculate item values
     item_list = []
     tot_taxable = 0.0
     tot_cgst = 0.0
@@ -385,7 +378,7 @@ with tab1:
 # TAB 2: Upload EDITED invoices to create government ready JSON
 with tab2:
     st.subheader("Edited Invoice Upload Karein aur e-Invoice JSON Payein")
-    st.info("💡 Yahan aap apni edit/change ki hui invoices upload kar sakte hain, portal ready JSON direct generate ho jayega.")
+    st.info("💡 Yahan aap apni edit ki hui invoices upload kar sakte hain, portal ready JSON direct generate ho jayega.")
     uploaded_edited_invoices = st.file_uploader("Edited Invoices Upload Karein (Single / Bulk)", type=["pdf"], accept_multiple_files=True, key="edited_tab_uploader")
 
     if uploaded_edited_invoices:
