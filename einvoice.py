@@ -8,12 +8,12 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="e-Invoice Gateway & Excel Suite", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="e-Invoice Gateway v1.01", page_icon="🧾", layout="centered")
 
 st.markdown("""
     <div style="text-align: center; padding: 10px 0 20px 0;">
-        <h2 style="color: #FFFFFF; margin-bottom: 4px;">⚡ Blinkit e-Invoice Gateway</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Government Portal Ready JSON & Official NIC Bulk Excel Generator</p>
+        <h2 style="color: #FFFFFF; margin-bottom: 4px;">⚡ Blinkit e-Invoice Gateway (v1.01)</h2>
+        <p style="color: #94a3b8; font-size: 14px;">NIC Offline Utility v1.01 Excel & JSON Generator</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -30,6 +30,7 @@ def extract_metadata(full_text):
     for fmt in ("%b %d, %Y", "%B %d, %Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
             d_obj = datetime.strptime(raw_date, fmt)
+            clean_date = d_obj.strftime("%d-%m-%Y")
             std_date_for_json = d_obj.strftime("%d/%m/%Y")
             break
         except ValueError:
@@ -55,7 +56,6 @@ def parse_pdf_data(pdf_bytes):
 
     seller_state_code = seller_gstin[:2]
     buyer_state_code = buyer_gstin[:2]
-
     buyer_name = "BLINK COMMERCE PRIVATE LIMITED"
 
     line_items = []
@@ -131,7 +131,7 @@ def parse_pdf_data(pdf_bytes):
         "line_items": line_items
     }
 
-def build_einvoice_json_object(data):
+def build_einvoice_json_v101(data):
     seller_state_code = data["seller_state_code"]
     buyer_state_code = data["buyer_state_code"]
 
@@ -187,7 +187,7 @@ def build_einvoice_json_object(data):
     total_inv_val = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
 
     return {
-        "Version": "1.03",
+        "Version": "1.01",
         "TranDtls": {
             "TaxSch": "GST",
             "SupTyp": "B2B",
@@ -219,6 +219,8 @@ def build_einvoice_json_object(data):
             "Pin": data["buyer_pin"],
             "Stcd": buyer_state_code
         },
+        "DispDtls": None,
+        "ShipDtls": None,
         "ItemList": item_list,
         "ValDtls": {
             "AssVal": round(tot_taxable, 2),
@@ -232,13 +234,12 @@ def build_einvoice_json_object(data):
         }
     }
 
-def generate_official_nic_excel(data_list):
+def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "eInvoice"
     ws.views.sheetView[0].showGridLines = True
 
-    # Styling colors
     sky_blue = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
     light_blue = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
     peach = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
@@ -281,8 +282,9 @@ def generate_official_nic_excel(data_list):
         ("Document Details", 5, 7, peach),
         ("Buyer Details", 8, 18, light_blue),
         ("Dispatch Details", 19, 24, peach),
-        ("Item Details", 25, 38, green),
-        ("Invoice Value Details", 39, 44, sky_blue)
+        ("Shipping Details", 25, 32, light_blue),
+        ("Item Details", 33, 46, green),
+        ("Invoice Value Details", 47, 52, sky_blue)
     ]
 
     for name, sc, ec, fill in sections:
@@ -301,6 +303,7 @@ def generate_official_nic_excel(data_list):
         "Buyer Addr1 *", "Buyer Addr2", "Buyer Location *", "Buyer Pin Code *", 
         "Buyer State *", "Buyer Phone Number", "Buyer Email Id",
         "Dispatch Name", "Dispatch Addr1", "Dispatch Addr2", "Dispatch Location", "Dispatch Pin Code", "Dispatch State",
+        "Shipping GSTIN", "Shipping Legal Name", "Shipping Trade Name", "Shipping Addr1", "Shipping Addr2", "Shipping Location", "Shipping Pin Code", "Shipping State",
         "Sl. No *", "Product Description *", "Is Service *", "HSN Code *", "Quantity *", "Unit *", "Unit Price *", 
         "Gross Amount", "Taxable Value *", "GST Rate (%) *", "IGST Amount", "CGST Amount", "SGST Amount", "Total Item Value *",
         "Total Taxable Value *", "Total CGST Amount", "Total SGST Amount", "Total IGST Amount", "Round Off Amount", "Total Invoice Value *"
@@ -316,7 +319,9 @@ def generate_official_nic_excel(data_list):
             cell.fill = light_blue
         elif c_idx <= 24:
             cell.fill = peach
-        elif c_idx <= 38:
+        elif c_idx <= 32:
+            cell.fill = light_blue
+        elif c_idx <= 46:
             cell.fill = green
         else:
             cell.fill = sky_blue
@@ -324,7 +329,7 @@ def generate_official_nic_excel(data_list):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = thin_border
 
-    ws.row_dimensions[4].height = 40
+    ws.row_dimensions[4].height = 42
 
     curr_row = 5
     for inv in data_list:
@@ -363,14 +368,22 @@ def generate_official_nic_excel(data_list):
             item_val = round(taxable + cgst + sgst + igst, 2)
 
             row_data = [
+                # Supply Details
                 "B2B", "N", "", "N",
+                # Document Details
                 "Tax Invoice", inv["invoice_no"], inv["doc_date"],
+                # Buyer Details
                 inv["buyer_gstin"], inv["buyer_name"], inv["buyer_name"], buyer_state_code,
                 "Warehouse Facility, Junabganj Road", "", "Lucknow", inv["buyer_pin"],
                 "UTTAR PRADESH", "9139396200", "billing@blinkit.com",
-                "Warehouse Hub", "Industrial Area", "", "Lucknow", inv["seller_pin"], seller_state_code,
+                # Dispatch Details (KEPT BLANK)
+                "", "", "", "", "", "",
+                # Shipping Details (KEPT BLANK)
+                "", "", "", "", "", "", "", "",
+                # Item Details
                 s_no, it["desc"], "N", it["hsn"], qty, "BOX", price,
                 taxable, taxable, gst_rate, igst, cgst, sgst, item_val,
+                # Invoice Value Details
                 tot_taxable, tot_cgst, tot_sgst, tot_igst, 0.00, tot_inv_val
             ]
 
@@ -378,12 +391,12 @@ def generate_official_nic_excel(data_list):
                 cell = ws.cell(row=curr_row, column=c_idx, value=val)
                 cell.font = font_data
                 cell.border = thin_border
-                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 23, 24, 25, 27, 28, 30]:
+                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 33, 35, 36, 38]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
-                elif c_idx == 29:
+                elif c_idx == 37:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                     cell.number_format = "#,##0"
-                elif c_idx in [31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]:
+                elif c_idx in [39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                     cell.number_format = "#,##0.00"
                 else:
@@ -395,7 +408,7 @@ def generate_official_nic_excel(data_list):
     for t in tabs:
         d_ws = wb.create_sheet(title=t)
         d_ws.sheet_view.showGridLines = True
-        d_ws["A1"] = f"{t} - NIC e-Invoice Offline Utility"
+        d_ws["A1"] = f"{t} - NIC e-Invoice Offline Utility v1.01"
         d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
 
     for col in ws.columns:
@@ -426,31 +439,30 @@ if uploaded_invoices:
     if parsed_invoices:
         st.success(f"Successfully processed {len(parsed_invoices)} Invoices!")
         
-        # Prepare Excel & JSON outputs
-        excel_buffer = generate_official_nic_excel(parsed_invoices)
+        excel_buffer = generate_official_nic_v101_excel(parsed_invoices)
 
         if len(parsed_invoices) == 1:
             inv = parsed_invoices[0]
-            json_payload = build_einvoice_json_object(inv)
+            json_payload = build_einvoice_json_v101(inv)
             inv_no = inv["invoice_no"]
 
             c1, c2 = st.columns(2)
             with c1:
                 st.download_button(
-                    label=f"🧾 Download e-Invoice JSON",
+                    label=f"🧾 Download e-Invoice JSON (v1.01)",
                     data=json.dumps(json_payload, indent=4),
-                    file_name=f"{inv_no}_eInvoice.json",
+                    file_name=f"{inv_no}_eInvoice_v1.01.json",
                     mime="application/json"
                 )
             with c2:
                 st.download_button(
-                    label=f"📊 Download NIC Bulk Excel (.xlsx)",
+                    label=f"📊 Download NIC Bulk Excel v1.01",
                     data=excel_buffer,
-                    file_name=f"{inv_no}_NIC_eInvoice.xlsx",
+                    file_name=f"{inv_no}_NIC_v1.01.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
         else:
-            bulk_json = [build_einvoice_json_object(inv) for inv in parsed_invoices]
+            bulk_json = [build_einvoice_json_v101(inv) for inv in parsed_invoices]
             date_str = datetime.now().strftime('%d-%m-%Y')
 
             c1, c2 = st.columns(2)
@@ -458,13 +470,13 @@ if uploaded_invoices:
                 st.download_button(
                     label=f"🧾 Download Bulk e-Invoice JSON ({len(bulk_json)} Invoices)",
                     data=json.dumps(bulk_json, indent=4),
-                    file_name=f"Bulk_eInvoice_NIC_{date_str}.json",
+                    file_name=f"Bulk_eInvoice_NIC_v1.01_{date_str}.json",
                     mime="application/json"
                 )
             with c2:
                 st.download_button(
-                    label=f"📊 Download Bulk NIC Excel ({len(parsed_invoices)} Invoices)",
+                    label=f"📊 Download Bulk NIC Excel v1.01 ({len(parsed_invoices)} Invoices)",
                     data=excel_buffer,
-                    file_name=f"Bulk_NIC_eInvoice_{date_str}.xlsx",
+                    file_name=f"Bulk_NIC_v1.01_{date_str}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
