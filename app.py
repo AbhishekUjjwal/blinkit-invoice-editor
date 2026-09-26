@@ -43,7 +43,7 @@ st.markdown("""
 uploaded_invoice = st.file_uploader("", type=["pdf"])
 
 def overwrite_area(page, rect, new_text, font_size=7):
-    """Purane text ko white box se mask karke exact coordinate par naya text likhta hai"""
+    """Purane text ko white background se mask karke uski exact jagah naya value likhta hai"""
     pad_rect = fitz.Rect(rect.x0 - 1.5, rect.y0 - 0.5, rect.x1 + 1.5, rect.y1 + 0.5)
     page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
     page.insert_text(
@@ -59,6 +59,7 @@ def extract_metadata(doc):
     for page in doc:
         full_text += page.get_text() + "\n"
 
+    # 1. Extern Order No
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
@@ -72,9 +73,11 @@ def extract_metadata(doc):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
+    # 2. Invoice No
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "Invoice"
 
+    # 3. Invoice Date
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -101,7 +104,25 @@ def process_universal_blinkit_invoice(pdf_bytes):
         words = page.get_text("words")
         blocks = page.get_text("blocks")
 
-        # Dispo aur Comfit rows locate karein
+        # Step A: Table Header se Qty aur Unit Price ke dynamic X-boundaries dhoondhna
+        qty_x_range = None
+        price_x_range = None
+
+        for w in words:
+            w_text = w[4].strip().lower()
+            if w_text == "qty":
+                qty_x_range = (w[0] - 25, w[2] + 25)
+            elif w_text == "price" or "unit" in w_text:
+                if not price_x_range or w[0] < price_x_range[0]:
+                    price_x_range = (w[0] - 20, w[2] + 45)
+
+        # Fallback ranges (Vin e-Retail table layout ke according)
+        if not qty_x_range:
+            qty_x_range = (430, 500)
+        if not price_x_range:
+            price_x_range = (495, 575)
+
+        # Step B: Dispo aur Comfit ke product rows identify karna
         detected_rows = []
         for b in blocks:
             b_text = b[4].upper()
@@ -115,39 +136,41 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 detected_rows.append({
                     "factor": factor,
                     "y_top": b[1] - 4,
-                    "y_bottom": b[3] + 10
+                    "y_bottom": b[3] + 8
                 })
 
+        # Step C: Har product row ke andar purely DYNAMIC calculation
         for row in detected_rows:
             factor = row["factor"]
             y0, y1 = row["y_top"], row["y_bottom"]
 
-            # Row ke andar ke saare words ko left-to-right (x0 order me) sort karein
-            row_words = [w for w in words if y0 <= w[1] and w[3] <= y1 + 8]
-            row_words.sort(key=lambda x: x[0])
-
-            qty_found = False
-            for w in row_words:
+            for w in words:
                 w_rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 w_val = w[4].replace(",", "").strip()
 
-                # 1. Pehla pura number jo HSN ke baad aaye wo Qty hai (X-coord > 300)
-                if not qty_found and w[0] > 300 and w_val.isdigit() and int(w_val) >= factor:
-                    orig_qty = int(w_val)
-                    new_qty = orig_qty // factor
-                    overwrite_area(page, w_rect, f"{new_qty}")
-                    qty_found = True
-                    continue
+                # Row vertical boundary
+                if y0 <= w_rect.y0 and w_rect.y1 <= y1:
+                    x0 = w_rect.x0
 
-                # 2. Qty ke theek baad aane wala pehla decimal number = UNIT PRICE (Multiply with factor)
-                if qty_found and re.match(r"^\d+\.\d{2}$", w_val):
-                    orig_price = float(w_val)
-                    if orig_price > 0.00:
-                        new_price = round(orig_price * factor, 2)
-                        overwrite_area(page, w_rect, f"{new_price:.2f}")
-                        break  # Unit price mil gaya, aage Discount (0.00) aur Taxable Value ko touch na kare
+                    # 1. DYNAMIC QUANTITY: Qty column ke andar ka koi bhi integer
+                    if qty_x_range[0] <= x0 <= qty_x_range[1]:
+                        if w_val.isdigit() and int(w_val) > 0:
+                            current_qty = int(w_val)
+                            # Sirf tab divide karein jab quantity factor se badi ya barabar ho
+                            if current_qty >= factor:
+                                new_qty = current_qty // factor
+                                overwrite_area(page, w_rect, f"{new_qty}")
 
-        # 3. UOM Updates to UOM-BOX
+                    # 2. DYNAMIC UNIT PRICE: Unit Price column ke andar ka koi bhi decimal rate
+                    elif price_x_range[0] <= x0 <= price_x_range[1]:
+                        if re.match(r"^\d+\.\d{2}$", w_val):
+                            current_price = float(w_val)
+                            # 0.00 (discount vagera) ko chhodkar baki koi bhi price ho multiply karega
+                            if current_price > 0.00:
+                                new_price = round(current_price * factor, 2)
+                                overwrite_area(page, w_rect, f"{new_price:.2f}")
+
+        # Step D: UOM standardisation to UOM-BOX
         for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
             for inst in page.search_for(target):
                 overwrite_area(page, inst, "UOM-BOX")
@@ -163,7 +186,7 @@ def process_universal_blinkit_invoice(pdf_bytes):
     return out_buffer, download_filename
 
 if uploaded_invoice:
-    st.info("Invoice analyze ho raha hai...")
+    st.info("Dynamic calculation active: Processing line-items...")
     try:
         updated_pdf_buffer, out_filename = process_universal_blinkit_invoice(uploaded_invoice.read())
         st.success(f"File ready: {out_filename}")
