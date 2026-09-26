@@ -42,7 +42,6 @@ st.markdown("""
 uploaded_invoice = st.file_uploader("", type=["pdf"])
 
 def overwrite_area(page, rect, new_text, font_size=7):
-    """Purane text ko white box se mask karke uski jagah naya converted text likhta hai"""
     pad_rect = fitz.Rect(rect.x0 - 1.5, rect.y0 - 0.5, rect.x1 + 1.5, rect.y1 + 0.5)
     page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
     page.insert_text(
@@ -54,25 +53,19 @@ def overwrite_area(page, rect, new_text, font_size=7):
     )
 
 def extract_metadata(doc):
-    def extract_metadata(doc):
-    """Blinkit/Vin invoice ke header se exact External Order ID, Invoice No aur Date read karta hai"""
     full_text = ""
     for page in doc:
         full_text += page.get_text() + "\n"
 
-    # 1. External Order ID
     ext_match = re.search(r"(?:External\s*Order\s*(?:ID|No\.?)|Channel\s*Order\s*ID|PO\s*No\.?)[\s:]+([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
     ext_order_id = ext_match.group(1).replace("/", "-") if ext_match else "ExtOrder"
 
-    # 2. Invoice Number
     inv_match = re.search(r"(?:Tax\s*Invoice\s*No\.?|Invoice\s*No\.?|Invoice\s*Number)[\s:]+([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).replace("/", "-") if inv_match else "Invoice"
 
-    # 3. Invoice Date
     date_match = re.search(r"(?:Invoice\s*Date|Dated?|Date)[\s:]+([0-3]?[0-9][\.\-/][0-1]?[0-9][\.\-/][1-2][0-9]{3})", full_text, re.IGNORECASE)
     invoice_date = date_match.group(1).replace("/", "-").replace(".", "-") if date_match else "Date"
 
-    # Clean characters
     clean_ext = re.sub(r'[^A-Za-z0-9\-_]', '', ext_order_id)
     clean_inv = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_no)
     clean_date = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_date)
@@ -81,8 +74,6 @@ def extract_metadata(doc):
 
 def process_universal_blinkit_invoice(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-    # Sequence format filename
     download_filename = extract_metadata(doc)
 
     for page in doc:
@@ -129,14 +120,12 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 w_val = w[4].replace(",", "").strip()
 
                 if y0 <= w_rect.y0 and w_rect.y1 <= y1 + 8:
-                    # Qty column calculation
                     if qty_x_range[0] <= w_rect.x0 <= qty_x_range[1]:
                         if w_val.isdigit() and int(w_val) >= factor:
                             orig_qty = int(w_val)
                             new_qty = orig_qty // factor
                             overwrite_area(page, w_rect, f"{new_qty}")
 
-                    # Unit price column calculation
                     elif price_x_range[0] <= w_rect.x0 <= price_x_range[1]:
                         if re.match(r"^\d+(\.\d+)?$", w_val):
                             orig_price = float(w_val)
@@ -144,7 +133,6 @@ def process_universal_blinkit_invoice(pdf_bytes):
                                 new_price = round(orig_price * factor, 2)
                                 overwrite_area(page, w_rect, f"{new_price:.2f}")
 
-        # UOM updates
         for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
             for inst in page.search_for(target):
                 overwrite_area(page, inst, "UOM-BOX")
