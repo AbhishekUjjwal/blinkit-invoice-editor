@@ -59,7 +59,6 @@ def extract_metadata(doc):
     for page in doc:
         full_text += page.get_text() + "\n"
 
-    # 1. Extern Order No Target
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
@@ -73,11 +72,9 @@ def extract_metadata(doc):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
-    # 2. Invoice No Target
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "Invoice"
 
-    # 3. Invoice Date Target
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -104,7 +101,7 @@ def process_universal_blinkit_invoice(pdf_bytes):
         words = page.get_text("words")
         blocks = page.get_text("blocks")
 
-        # Dispo aur Comfit rows ki boundaries nikalna
+        # Dispo aur Comfit rows locate karein
         detected_rows = []
         for b in blocks:
             b_text = b[4].upper()
@@ -118,44 +115,43 @@ def process_universal_blinkit_invoice(pdf_bytes):
                 detected_rows.append({
                     "factor": factor,
                     "y_top": b[1] - 4,
-                    "y_bottom": b[3] + 6
+                    "y_bottom": b[3] + 10
                 })
 
-        # Har row ke elements ko process karna
         for row in detected_rows:
             factor = row["factor"]
             y0, y1 = row["y_top"], row["y_bottom"]
 
-            for w in words:
+            # Row ke andar ke saare words ko left-to-right (x0 order me) sort karein
+            row_words = [w for w in words if y0 <= w[1] and w[3] <= y1 + 8]
+            row_words.sort(key=lambda x: x[0])
+
+            qty_found = False
+            for w in row_words:
                 w_rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 w_val = w[4].replace(",", "").strip()
 
-                # Row ke vertical bounds ke andar
-                if y0 <= w_rect.y0 and w_rect.y1 <= y1 + 8:
-                    x_pos = w_rect.x0
+                # 1. Pehla pura number jo HSN ke baad aaye wo Qty hai (X-coord > 300)
+                if not qty_found and w[0] > 300 and w_val.isdigit() and int(w_val) >= factor:
+                    orig_qty = int(w_val)
+                    new_qty = orig_qty // factor
+                    overwrite_area(page, w_rect, f"{new_qty}")
+                    qty_found = True
+                    continue
 
-                    # 1. Quantity column (X coordinate roughly 300 se 390 ke beech)
-                    if 300 <= x_pos <= 390:
-                        if w_val.isdigit() and int(w_val) >= factor:
-                            orig_qty = int(w_val)
-                            new_qty = orig_qty // factor
-                            overwrite_area(page, w_rect, f"{new_qty}")
+                # 2. Qty ke theek baad aane wala pehla decimal number = UNIT PRICE (Multiply with factor)
+                if qty_found and re.match(r"^\d+\.\d{2}$", w_val):
+                    orig_price = float(w_val)
+                    if orig_price > 0.00:
+                        new_price = round(orig_price * factor, 2)
+                        overwrite_area(page, w_rect, f"{new_price:.2f}")
+                        break  # Unit price mil gaya, aage Discount (0.00) aur Taxable Value ko touch na kare
 
-                    # 2. Unit Price column (X coordinate 390 se 470 ke beech)
-                    elif 390 <= x_pos <= 475:
-                        # Sirf unit price decimal match karega (Discount 0.00 ko touch nahi karega)
-                        if re.match(r"^\d+\.\d{2}$", w_val):
-                            orig_price = float(w_val)
-                            if orig_price > 0.00:
-                                new_price = round(orig_price * factor, 2)
-                                overwrite_area(page, w_rect, f"{new_price:.2f}")
-
-        # 3. UOM Replacements
+        # 3. UOM Updates to UOM-BOX
         for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
             for inst in page.search_for(target):
                 overwrite_area(page, inst, "UOM-BOX")
 
-        # Niche toot kar bacha hua 'S' white-out karna
         for s_inst in page.search_for("S"):
             if 140 <= s_inst.x0 <= 260:
                 page.draw_rect(s_inst, color=None, fill=(1, 1, 1))
