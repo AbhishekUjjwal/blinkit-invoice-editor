@@ -3,29 +3,44 @@ import fitz  # PyMuPDF
 import re
 import io
 import json
+import zipfile
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="e-Invoice Gateway v1.01", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="Blinkit Operations & e-Invoice Suite", page_icon="⚡", layout="wide")
 
 st.markdown("""
-    <div style="text-align: center; padding: 10px 0 20px 0;">
-        <h2 style="color: #FFFFFF; margin-bottom: 4px;">⚡ Blinkit e-Invoice Gateway (v1.01)</h2>
-        <p style="color: #94a3b8; font-size: 14px;">NIC Offline Utility v1.01 Excel & JSON Generator</p>
+    <div style="text-align: center; padding: 15px 0 20px 0;">
+        <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Blinkit All-in-One Operations Gateway</h2>
+        <p style="color: #94a3b8; font-size: 14px;">1-Click: Reconcile Invoice PDF + NIC v1.01 Bulk Excel + e-Invoice JSON</p>
     </div>
 """, unsafe_allow_html=True)
 
-uploaded_invoices = st.file_uploader("Upload Blinkit Invoices (PDF)", type=["pdf"], accept_multiple_files=True)
+uploaded_invoices = st.file_uploader("Upload Blinkit Invoices (PDF) - Single ya Bulk", type=["pdf"], accept_multiple_files=True)
+
+# ----------------- DYNAMIC DATA EXTRACTION -----------------
 
 def extract_metadata(full_text):
+    ext_order_id = None
+    ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
+    if ext_match:
+        ext_order_id = "".join(ext_match.group(1).split())
+    if not ext_order_id:
+        digits_match = re.findall(r"\b(49\d{8,14}|5\d{8,14}|\d{12,18})\b", full_text)
+        if digits_match:
+            ext_order_id = digits_match[0]
+    if not ext_order_id:
+        ext_order_id = "ExtOrder"
+
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "INV-001"
 
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
+    clean_date = raw_date
     std_date_for_json = datetime.now().strftime("%d/%m/%Y")
     for fmt in ("%b %d, %Y", "%B %d, %Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
         try:
@@ -36,15 +51,25 @@ def extract_metadata(full_text):
         except ValueError:
             pass
 
-    return invoice_no, std_date_for_json
+    clean_ext = re.sub(r'[^A-Za-z0-9\-_]', '', ext_order_id)
+    clean_inv = re.sub(r'[^A-Za-z0-9\-_]', '', invoice_no)
+    clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
+    pdf_filename = f"{clean_ext}_{clean_inv}_{clean_dt}.pdf"
 
-def parse_pdf_data(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    full_text = ""
-    for p in doc:
-        full_text += p.get_text() + "\n"
+    # Dynamic Seller & Buyer Extraction
+    seller_name = "SELLER ENTERPRISE"
+    m_seller = re.search(r"(?:Sold\s*By|Seller\s*(?:Name)?|Consignor|From)[:\s]*\n?([^\n\r]+)", full_text, re.IGNORECASE)
+    if m_seller:
+        cand = m_seller.group(1).strip()
+        if len(cand) > 3 and not re.search(r"(gstin|invoice|date|order)", cand, re.I):
+            seller_name = cand
 
-    invoice_no, std_date = extract_metadata(full_text)
+    buyer_name = "BUYER ENTERPRISE"
+    m_buyer = re.search(r"(?:Billed\s*To|Buyer\s*(?:Name)?|Consignee|Customer|Bill\s*To)[:\s]*\n?([^\n\r]+)", full_text, re.IGNORECASE)
+    if m_buyer:
+        cand = m_buyer.group(1).strip()
+        if len(cand) > 3 and not re.search(r"(gstin|invoice|date|order)", cand, re.I):
+            buyer_name = cand
 
     gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
     seller_gstin = gstins[0] if len(gstins) > 0 else "09AAFCG9846E1Z9"
@@ -56,9 +81,48 @@ def parse_pdf_data(pdf_bytes):
 
     seller_state_code = seller_gstin[:2]
     buyer_state_code = buyer_gstin[:2]
-    buyer_name = "BLINK COMMERCE PRIVATE LIMITED"
 
+    # Seller & Buyer Location / Address
+    seller_loc = "Lucknow"
+    buyer_loc = "Lucknow"
+    loc_matches = re.findall(r"(?:Location|City|Place|Hub)[:\s]*([A-Za-z\s]+)", full_text, re.IGNORECASE)
+    if len(loc_matches) > 0:
+        seller_loc = loc_matches[0].strip()
+    if len(loc_matches) > 1:
+        buyer_loc = loc_matches[1].strip()
+
+    return {
+        "invoice_no": invoice_no,
+        "doc_date": std_date_for_json,
+        "pdf_filename": pdf_filename,
+        "seller_name": seller_name,
+        "buyer_name": buyer_name,
+        "seller_gstin": seller_gstin,
+        "buyer_gstin": buyer_gstin,
+        "seller_pin": seller_pin,
+        "buyer_pin": buyer_pin,
+        "seller_loc": seller_loc,
+        "buyer_loc": buyer_loc,
+        "seller_state_code": seller_state_code,
+        "buyer_state_code": buyer_state_code
+    }
+
+# ----------------- PDF RECONCILIATION -----------------
+
+def overwrite_area(page, rect, new_text, font_size=7):
+    pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
+    page.draw_rect(pad_rect, color=None, fill=(1, 1, 1))
+    page.insert_text((rect.x0, rect.y1 - 1.2), str(new_text), fontsize=font_size, fontname="helv", color=(0, 0, 0))
+
+def process_and_reconcile_pdf(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    full_text = ""
+    for p in doc:
+        full_text += p.get_text() + "\n"
+
+    meta = extract_metadata(full_text)
     line_items = []
+
     for page in doc:
         words = page.get_text("words")
         qty_box = None
@@ -95,17 +159,23 @@ def parse_pdf_data(pdf_bytes):
 
             for w in row_words:
                 val = w[4].replace(",", "").strip()
+                rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 if qty_box[0] <= w[0] <= qty_box[1]:
                     if val.isdigit() and len(val) != 8:
                         orig_q = int(val)
                         if orig_q >= factor:
                             final_q = orig_q // factor
+                            overwrite_area(page, rect, f"{final_q}")
 
+            for w in row_words:
+                val = w[4].replace(",", "").strip()
+                rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 if price_box[0] <= w[0] <= price_box[1]:
                     if re.match(r"^\d+\.\d{2}$", val):
                         orig_p = float(val)
                         if orig_p > 0.00:
                             final_p = round(orig_p * factor, 2)
+                            overwrite_area(page, rect, f"{final_p:.2f}")
 
             if final_q and final_p:
                 line_items.append({
@@ -116,20 +186,23 @@ def parse_pdf_data(pdf_bytes):
                     "gst_rate": 5.0
                 })
 
-    doc.close()
+        for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
+            for inst in page.search_for(target):
+                overwrite_area(page, inst, "UOM-BOX")
 
-    return {
-        "invoice_no": invoice_no,
-        "doc_date": std_date,
-        "seller_gstin": seller_gstin,
-        "buyer_gstin": buyer_gstin,
-        "seller_pin": seller_pin,
-        "buyer_pin": buyer_pin,
-        "seller_state_code": seller_state_code,
-        "buyer_state_code": buyer_state_code,
-        "buyer_name": buyer_name,
-        "line_items": line_items
-    }
+        for s_inst in page.search_for("S"):
+            if 140 <= s_inst.x0 <= 260:
+                page.draw_rect(s_inst, color=None, fill=(1, 1, 1))
+
+    out_pdf_buf = io.BytesIO()
+    doc.save(out_pdf_buf)
+    doc.close()
+    out_pdf_buf.seek(0)
+
+    meta["line_items"] = line_items
+    return out_pdf_buf, meta
+
+# ----------------- JSON v1.01 BUILDER -----------------
 
 def build_einvoice_json_v101(data):
     seller_state_code = data["seller_state_code"]
@@ -202,10 +275,10 @@ def build_einvoice_json_v101(data):
         },
         "SellerDtls": {
             "Gstin": data["seller_gstin"],
-            "LglNm": "SELLER TRADING CO",
-            "TrdNm": "SELLER TRADING CO",
-            "Addr1": "Warehouse Address",
-            "Loc": "City",
+            "LglNm": data["seller_name"],
+            "TrdNm": data["seller_name"],
+            "Addr1": f"Warehouse Facility, {data['seller_loc']}",
+            "Loc": data["seller_loc"],
             "Pin": data["seller_pin"],
             "Stcd": seller_state_code
         },
@@ -214,8 +287,8 @@ def build_einvoice_json_v101(data):
             "LglNm": data["buyer_name"],
             "TrdNm": data["buyer_name"],
             "Pos": buyer_state_code,
-            "Addr1": "Warehouse Facility, Junabganj Road",
-            "Loc": "Lucknow",
+            "Addr1": f"Warehouse Facility, {data['buyer_loc']}",
+            "Loc": data["buyer_loc"],
             "Pin": data["buyer_pin"],
             "Stcd": buyer_state_code
         },
@@ -233,6 +306,8 @@ def build_einvoice_json_v101(data):
             "TotInvVal": total_inv_val
         }
     }
+
+# ----------------- OFFICIAL NIC v1.01 EXCEL BUILDER -----------------
 
 def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
@@ -374,8 +449,8 @@ def generate_official_nic_v101_excel(data_list):
                 "Tax Invoice", inv["invoice_no"], inv["doc_date"],
                 # Buyer Details
                 inv["buyer_gstin"], inv["buyer_name"], inv["buyer_name"], buyer_state_code,
-                "Warehouse Facility, Junabganj Road", "", "Lucknow", inv["buyer_pin"],
-                "UTTAR PRADESH", "9139396200", "billing@blinkit.com",
+                f"Warehouse Facility, {inv['buyer_loc']}", "", inv["buyer_loc"], inv["buyer_pin"],
+                buyer_state_code, "", "",
                 # Dispatch Details (KEPT BLANK)
                 "", "", "", "", "", "",
                 # Shipping Details (KEPT BLANK)
@@ -427,56 +502,92 @@ def generate_official_nic_v101_excel(data_list):
     out_io.seek(0)
     return out_io
 
+# ----------------- MAIN PROCESSING WORKFLOW -----------------
+
 if uploaded_invoices:
-    parsed_invoices = []
+    processed_docs = []
     for file in uploaded_invoices:
         try:
-            data = parse_pdf_data(file.read())
-            parsed_invoices.append(data)
+            pdf_bytes = file.read()
+            reconciled_pdf_buf, meta = process_and_reconcile_pdf(pdf_bytes)
+            processed_docs.append({
+                "pdf_buf": reconciled_pdf_buf,
+                "meta": meta
+            })
         except Exception as e:
-            st.error(f"Error reading {file.name}: {str(e)}")
+            st.error(f"Error processing {file.name}: {str(e)}")
 
-    if parsed_invoices:
-        st.success(f"Successfully processed {len(parsed_invoices)} Invoices!")
+    if processed_docs:
+        st.success(f"✅ Successfully processed {len(processed_docs)} Invoices!")
         
+        parsed_invoices = [doc["meta"] for doc in processed_docs]
         excel_buffer = generate_official_nic_v101_excel(parsed_invoices)
 
-        if len(parsed_invoices) == 1:
-            inv = parsed_invoices[0]
-            json_payload = build_einvoice_json_v101(inv)
-            inv_no = inv["invoice_no"]
+        # SINGLE INVOICE ACTIONS
+        if len(processed_docs) == 1:
+            doc = processed_docs[0]
+            meta = doc["meta"]
+            pdf_buf = doc["pdf_buf"]
+            json_payload = build_einvoice_json_v101(meta)
+            inv_no = meta["invoice_no"]
+            pdf_name = meta["pdf_filename"]
 
-            c1, c2 = st.columns(2)
+            st.write(f"**Seller:** `{meta['seller_name']}` | **Buyer:** `{meta['buyer_name']}` | **Invoice:** `{inv_no}`")
+
+            c1, c2, c3 = st.columns(3)
             with c1:
+                st.download_button(
+                    label=f"📥 Download Edited PDF",
+                    data=pdf_buf,
+                    file_name=pdf_name,
+                    mime="application/pdf"
+                )
+            with c2:
+                st.download_button(
+                    label=f"📊 Download NIC Bulk Excel (v1.01)",
+                    data=excel_buffer,
+                    file_name=f"{inv_no}_NIC_v1.01.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            with c3:
                 st.download_button(
                     label=f"🧾 Download e-Invoice JSON (v1.01)",
                     data=json.dumps(json_payload, indent=4),
                     file_name=f"{inv_no}_eInvoice_v1.01.json",
                     mime="application/json"
                 )
-            with c2:
-                st.download_button(
-                    label=f"📊 Download NIC Bulk Excel v1.01",
-                    data=excel_buffer,
-                    file_name=f"{inv_no}_NIC_v1.01.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+
+        # BULK INVOICE ACTIONS
         else:
-            bulk_json = [build_einvoice_json_v101(inv) for inv in parsed_invoices]
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for idx, doc in enumerate(processed_docs, 1):
+                    pdf_name = doc["meta"]["pdf_filename"]
+                    zip_file.writestr(pdf_name, doc["pdf_buf"].getvalue())
+            zip_buffer.seek(0)
+
+            bulk_json = [build_einvoice_json_v101(d["meta"]) for d in processed_docs]
             date_str = datetime.now().strftime('%d-%m-%Y')
 
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
+                st.download_button(
+                    label=f"📦 Download All Edited PDFs ({len(processed_docs)} Files - ZIP)",
+                    data=zip_buffer,
+                    file_name=f"Blinkit_Edited_Invoices_{date_str}.zip",
+                    mime="application/zip"
+                )
+            with c2:
+                st.download_button(
+                    label=f"📊 Download Bulk NIC Excel v1.01 ({len(processed_docs)} Invoices)",
+                    data=excel_buffer,
+                    file_name=f"Bulk_NIC_v1.01_{date_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            with c3:
                 st.download_button(
                     label=f"🧾 Download Bulk e-Invoice JSON ({len(bulk_json)} Invoices)",
                     data=json.dumps(bulk_json, indent=4),
                     file_name=f"Bulk_eInvoice_NIC_v1.01_{date_str}.json",
                     mime="application/json"
-                )
-            with c2:
-                st.download_button(
-                    label=f"📊 Download Bulk NIC Excel v1.01 ({len(parsed_invoices)} Invoices)",
-                    data=excel_buffer,
-                    file_name=f"Bulk_NIC_v1.01_{date_str}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
