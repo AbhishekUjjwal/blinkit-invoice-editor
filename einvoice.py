@@ -9,20 +9,35 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="Blinkit Operations & e-Invoice Suite", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Universal Invoice & e-Invoice Suite", page_icon="⚡", layout="wide")
 
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
-        <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Blinkit All-in-One Operations Gateway</h2>
-        <p style="color: #94a3b8; font-size: 14px;">1-Click: Reconcile Invoice PDF + NIC v1.01 Bulk Excel + e-Invoice JSON</p>
+        <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal e-Invoice & Operations Gateway</h2>
+        <p style="color: #94a3b8; font-size: 14px;">100% Dynamic Buyer & Seller Extraction | PDF Reconcile + NIC v1.01 Bulk Excel + e-Invoice JSON</p>
     </div>
 """, unsafe_allow_html=True)
 
-uploaded_invoices = st.file_uploader("Upload Blinkit Invoices (PDF) - Single ya Bulk", type=["pdf"], accept_multiple_files=True)
+uploaded_invoices = st.file_uploader("Upload Invoices (PDF) - Single ya Bulk", type=["pdf"], accept_multiple_files=True)
 
-# ----------------- DYNAMIC DATA EXTRACTION -----------------
+# GST State Code to State Name Master Dictionary
+STATE_CODE_MAP = {
+    "01": "JAMMU AND KASHMIR", "02": "HIMACHAL PRADESH", "03": "PUNJAB", "04": "CHANDIGARH",
+    "05": "UTTARAKHAND", "06": "HARYANA", "07": "DELHI", "08": "RAJASTHAN",
+    "09": "UTTAR PRADESH", "10": "BIHAR", "11": "SIKKIM", "12": "ARUNACHAL PRADESH",
+    "13": "NAGALAND", "14": "MANIPUR", "15": "MIZORAM", "16": "TRIPURA",
+    "17": "MEGHALAYA", "18": "ASSAM", "19": "WEST BENGAL", "20": "JHARKHAND",
+    "21": "ODISHA", "22": "CHATTISGARH", "23": "MADHYA PRADESH", "24": "GUJARAT",
+    "26": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU", "27": "MAHARASHTRA", "29": "KARNATAKA",
+    "30": "GOA", "31": "LAKSHADWEEP", "32": "KERALA", "33": "TAMIL NADU",
+    "34": "PUDUCHERRY", "35": "ANDAMAN AND NICOBAR ISLANDS", "36": "TELANGANA", "37": "ANDHRA PRADESH",
+    "38": "LADAKH"
+}
+
+# ----------------- 100% DYNAMIC DATA EXTRACTION -----------------
 
 def extract_metadata(full_text):
+    # External Order ID
     ext_order_id = None
     ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
     if ext_match:
@@ -34,9 +49,11 @@ def extract_metadata(full_text):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
-    inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_]+)", full_text, re.IGNORECASE)
+    # Invoice No
+    inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "INV-001"
 
+    # Invoice Date
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -56,55 +73,125 @@ def extract_metadata(full_text):
     clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
     pdf_filename = f"{clean_ext}_{clean_inv}_{clean_dt}.pdf"
 
-    # Dynamic Seller & Buyer Extraction
-    seller_name = "SELLER ENTERPRISE"
-    m_seller = re.search(r"(?:Sold\s*By|Seller\s*(?:Name)?|Consignor|From)[:\s]*\n?([^\n\r]+)", full_text, re.IGNORECASE)
-    if m_seller:
-        cand = m_seller.group(1).strip()
-        if len(cand) > 3 and not re.search(r"(gstin|invoice|date|order)", cand, re.I):
-            seller_name = cand
+    # 1. DYNAMIC SELLER EXTRACTION (Sold By block)
+    seller_name = ""
+    seller_addr1 = ""
+    seller_loc = ""
+    seller_pin = 110028
+    seller_gstin = ""
 
-    buyer_name = "BUYER ENTERPRISE"
-    m_buyer = re.search(r"(?:Billed\s*To|Buyer\s*(?:Name)?|Consignee|Customer|Bill\s*To)[:\s]*\n?([^\n\r]+)", full_text, re.IGNORECASE)
-    if m_buyer:
-        cand = m_buyer.group(1).strip()
-        if len(cand) > 3 and not re.search(r"(gstin|invoice|date|order)", cand, re.I):
-            buyer_name = cand
+    seller_block_m = re.search(r"(?:Sold\s*By|Seller\s*Details|From)[:\s]*\n(.*?)(?=\n\s*(?:Billing|Billed|Order\s*No|Invoice\s*No|\Z))", full_text, re.DOTALL | re.IGNORECASE)
+    if seller_block_m:
+        s_block = seller_block_m.group(1).strip()
+        s_lines = [l.strip() for l in s_block.split("\n") if l.strip()]
+        if len(s_lines) > 0:
+            seller_name = s_lines[0]
+        if len(s_lines) > 1:
+            seller_addr1 = s_lines[1]
 
-    gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
-    seller_gstin = gstins[0] if len(gstins) > 0 else "09AAFCG9846E1Z9"
-    buyer_gstin = gstins[1] if len(gstins) > 1 else seller_gstin
+        s_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", s_block, re.IGNORECASE)
+        if s_gst_m:
+            seller_gstin = s_gst_m.group(1).strip()
 
-    pincodes = re.findall(r"\b[1-9][0-9]{5}\b", full_text)
-    seller_pin = int(pincodes[0]) if len(pincodes) > 0 else 226401
-    buyer_pin = int(pincodes[1]) if len(pincodes) > 1 else seller_pin
+        s_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", s_block)
+        if s_pin_m:
+            seller_pin = int(s_pin_m[0])
+
+    if not seller_gstin:
+        all_gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
+        seller_gstin = all_gstins[0] if len(all_gstins) > 0 else "07AALCR5906L1ZW"
 
     seller_state_code = seller_gstin[:2]
-    buyer_state_code = buyer_gstin[:2]
+    seller_loc = STATE_CODE_MAP.get(seller_state_code, "Delhi").title()
 
-    # Seller & Buyer Location / Address
-    seller_loc = "Lucknow"
-    buyer_loc = "Lucknow"
-    loc_matches = re.findall(r"(?:Location|City|Place|Hub)[:\s]*([A-Za-z\s]+)", full_text, re.IGNORECASE)
-    if len(loc_matches) > 0:
-        seller_loc = loc_matches[0].strip()
-    if len(loc_matches) > 1:
-        buyer_loc = loc_matches[1].strip()
+    # 2. DYNAMIC BUYER EXTRACTION (Billing Address / Billed To block)
+    buyer_name = ""
+    buyer_addr1 = ""
+    buyer_loc = ""
+    buyer_pin = None
+    buyer_phone = ""
+    buyer_email = ""
+    buyer_gstin = ""
+
+    buyer_block_m = re.search(r"(?:Billing\s*Addr[a-z]*|Billed\s*To|Buyer\s*Details|Customer\s*Details)[:\s]*\n(.*?)(?=\n\s*(?:Shipping|Ship\s*To|S\.No|Item Code|H\s*S\s*N|\Z))", full_text, re.DOTALL | re.IGNORECASE)
+    if buyer_block_m:
+        b_block = buyer_block_m.group(1).strip()
+        b_lines = [l.strip() for l in b_block.split("\n") if l.strip()]
+
+        if len(b_lines) > 0:
+            buyer_name = b_lines[0]
+        if len(b_lines) > 1:
+            buyer_addr1 = b_lines[1]
+
+        # Extract Email
+        em_m = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", b_block)
+        if em_m:
+            buyer_email = em_m.group(0).strip()
+
+        # Extract Phone
+        ph_m = re.search(r"(?:Contact|Phone|Mob)?\s*[:\s]*([6-9]\d{9})", b_block, re.IGNORECASE)
+        if ph_m:
+            buyer_phone = ph_m.group(1).strip()
+
+        # Extract GSTIN
+        b_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", b_block, re.IGNORECASE)
+        if b_gst_m:
+            buyer_gstin = b_gst_m.group(1).strip()
+
+        # Extract Pin Code
+        b_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", b_block)
+        if b_pin_m:
+            buyer_pin = int(b_pin_m[0])
+
+        # Extract City / Location dynamically from address lines
+        for l in b_lines[1:]:
+            clean_l = re.sub(r"[0-9\-,]", " ", l).strip()
+            words = [w for w in clean_l.split() if len(w) > 3 and not re.search(r"(road|station|near|opp|street|nagar|floor|block|india|contact|gstin|pan|email)", w, re.I)]
+            if words:
+                buyer_loc = words[0].title()
+                break
+
+    # Fallbacks if buyer GSTIN wasn't in billing block
+    if not buyer_gstin:
+        all_gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
+        if len(all_gstins) > 1:
+            buyer_gstin = all_gstins[1]
+        elif len(all_gstins) == 1:
+            buyer_gstin = all_gstins[0]
+        else:
+            buyer_gstin = "09AAFCG9846E1Z9"
+
+    buyer_state_code = buyer_gstin[:2]
+    buyer_state_name = STATE_CODE_MAP.get(buyer_state_code, "UTTAR PRADESH")
+    if not buyer_loc:
+        buyer_loc = buyer_state_name.title()
+    if not buyer_pin:
+        buyer_pin = int(buyer_state_code + "0001") if buyer_state_code.isdigit() else 226401
+
+    # Place of Supply (POS)
+    pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*[A-Za-z\s\-]*(\d{2})", full_text, re.IGNORECASE)
+    buyer_pos = pos_match.group(1).strip() if pos_match else buyer_state_code
 
     return {
         "invoice_no": invoice_no,
         "doc_date": std_date_for_json,
         "pdf_filename": pdf_filename,
-        "seller_name": seller_name,
-        "buyer_name": buyer_name,
+        "seller_name": seller_name if seller_name else "SELLER ENTERPRISE",
         "seller_gstin": seller_gstin,
-        "buyer_gstin": buyer_gstin,
         "seller_pin": seller_pin,
-        "buyer_pin": buyer_pin,
         "seller_loc": seller_loc,
-        "buyer_loc": buyer_loc,
         "seller_state_code": seller_state_code,
-        "buyer_state_code": buyer_state_code
+        "buyer_name": buyer_name if buyer_name else "BUYER ENTERPRISE",
+        "buyer_trade_name": buyer_name if buyer_name else "BUYER ENTERPRISE",
+        "buyer_addr1": buyer_addr1 if buyer_addr1 else "Commercial Facility",
+        "buyer_loc": buyer_loc,
+        "buyer_pin": buyer_pin,
+        "buyer_phone": buyer_phone,
+        "buyer_email": buyer_email,
+        "buyer_gstin": buyer_gstin,
+        "buyer_state_code": buyer_state_code,
+        "buyer_state_name": buyer_state_name,
+        "buyer_pos": buyer_pos
     }
 
 # ----------------- PDF RECONCILIATION -----------------
@@ -206,7 +293,7 @@ def process_and_reconcile_pdf(pdf_bytes):
 
 def build_einvoice_json_v101(data):
     seller_state_code = data["seller_state_code"]
-    buyer_state_code = data["buyer_state_code"]
+    buyer_pos = data["buyer_pos"]
 
     item_list = []
     tot_taxable = 0.0
@@ -221,7 +308,7 @@ def build_einvoice_json_v101(data):
         tot_taxable += taxable_amt
 
         gst_rate = item.get("gst_rate", 5.0)
-        is_interstate = (seller_state_code != buyer_state_code)
+        is_interstate = (seller_state_code != buyer_pos)
 
         if is_interstate:
             igst_amt = round((taxable_amt * gst_rate) / 100, 2)
@@ -285,12 +372,12 @@ def build_einvoice_json_v101(data):
         "BuyerDtls": {
             "Gstin": data["buyer_gstin"],
             "LglNm": data["buyer_name"],
-            "TrdNm": data["buyer_name"],
-            "Pos": buyer_state_code,
-            "Addr1": f"Warehouse Facility, {data['buyer_loc']}",
+            "TrdNm": data["buyer_trade_name"],
+            "Pos": buyer_pos,
+            "Addr1": data["buyer_addr1"][:100],
             "Loc": data["buyer_loc"],
             "Pin": data["buyer_pin"],
-            "Stcd": buyer_state_code
+            "Stcd": buyer_pos
         },
         "DispDtls": None,
         "ShipDtls": None,
@@ -409,10 +496,10 @@ def generate_official_nic_v101_excel(data_list):
     curr_row = 5
     for inv in data_list:
         seller_state_code = inv["seller_state_code"]
-        buyer_state_code = inv["buyer_state_code"]
+        buyer_pos = inv["buyer_pos"]
 
         tot_taxable = sum([round(it["qty"] * it["unit_price"], 2) for it in inv["line_items"]])
-        is_interstate = (seller_state_code != buyer_state_code)
+        is_interstate = (seller_state_code != buyer_pos)
 
         if is_interstate:
             tot_igst = round(tot_taxable * 0.05, 2)
@@ -447,10 +534,10 @@ def generate_official_nic_v101_excel(data_list):
                 "B2B", "N", "", "N",
                 # Document Details
                 "Tax Invoice", inv["invoice_no"], inv["doc_date"],
-                # Buyer Details
-                inv["buyer_gstin"], inv["buyer_name"], inv["buyer_name"], buyer_state_code,
-                f"Warehouse Facility, {inv['buyer_loc']}", "", inv["buyer_loc"], inv["buyer_pin"],
-                buyer_state_code, "", "",
+                # Buyer Details (100% Dynamic)
+                inv["buyer_gstin"], inv["buyer_name"], inv["buyer_trade_name"], buyer_pos,
+                inv["buyer_addr1"], "", inv["buyer_loc"], inv["buyer_pin"],
+                inv["buyer_state_name"], inv["buyer_phone"], inv["buyer_email"],
                 # Dispatch Details (KEPT BLANK)
                 "", "", "", "", "", "",
                 # Shipping Details (KEPT BLANK)
@@ -466,7 +553,7 @@ def generate_official_nic_v101_excel(data_list):
                 cell = ws.cell(row=curr_row, column=c_idx, value=val)
                 cell.font = font_data
                 cell.border = thin_border
-                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 33, 35, 36, 38]:
+                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 33, 35, 36, 38]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                 elif c_idx == 37:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
@@ -502,7 +589,7 @@ def generate_official_nic_v101_excel(data_list):
     out_io.seek(0)
     return out_io
 
-# ----------------- MAIN PROCESSING WORKFLOW -----------------
+# ----------------- MAIN WORKFLOW -----------------
 
 if uploaded_invoices:
     processed_docs = []
@@ -532,7 +619,13 @@ if uploaded_invoices:
             inv_no = meta["invoice_no"]
             pdf_name = meta["pdf_filename"]
 
-            st.write(f"**Seller:** `{meta['seller_name']}` | **Buyer:** `{meta['buyer_name']}` | **Invoice:** `{inv_no}`")
+            st.markdown(f"""
+                <div style="background-color: #1e293b; padding: 12px 18px; border-radius: 8px; margin-bottom: 15px;">
+                    <b>Seller:</b> {meta['seller_name']} ({meta['seller_gstin']})<br>
+                    <b>Buyer:</b> {meta['buyer_name']} ({meta['buyer_gstin']})<br>
+                    <b>Address:</b> {meta['buyer_addr1']}, {meta['buyer_loc']} - {meta['buyer_pin']} ({meta['buyer_state_name']})
+                </div>
+            """, unsafe_allow_html=True)
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -574,7 +667,7 @@ if uploaded_invoices:
                 st.download_button(
                     label=f"📦 Download All Edited PDFs ({len(processed_docs)} Files - ZIP)",
                     data=zip_buffer,
-                    file_name=f"Blinkit_Edited_Invoices_{date_str}.zip",
+                    file_name=f"Invoices_Edited_{date_str}.zip",
                     mime="application/zip"
                 )
             with c2:
