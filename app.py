@@ -101,81 +101,58 @@ def process_universal_blinkit_invoice(pdf_bytes):
     download_filename = extract_metadata(doc)
 
     for page in doc:
-        words = page.get_text("words")
-        blocks = page.get_text("blocks")
-
-        # 1. Header se Columns ke actual X-Coordinates nikalna
-        qty_x = None
-        discount_x = None
-        price_words = []
-
+        words = page.get_text("words")  # (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        
+        # 1. Page ke saare Dispo aur Comfit occurrences dhoondhein
+        targets = []
         for w in words:
-            w_text = w[4].strip().lower()
-            if w_text == "qty":
-                qty_x = w[0]
-            elif "discount" in w_text:
-                discount_x = w[0]
-            elif "price" in w_text or "unit" in w_text:
-                price_words.append(w)
+            w_text = w[4].upper()
+            if "DISPO" in w_text:
+                targets.append({"factor": 50, "y_center": (w[1] + w[3]) / 2, "name": "DISPO"})
+            elif "COMFIT" in w_text:
+                targets.append({"factor": 25, "y_center": (w[1] + w[3]) / 2, "name": "COMFIT"})
 
-        # Unit Price column boundaries (Qty aur Discount ke beech ka area)
-        if qty_x and discount_x:
-            price_min_x = qty_x + 15
-            price_max_x = discount_x - 5
-            qty_min_x = qty_x - 30
-            qty_max_x = qty_x + 35
-        else:
-            # Layout fallback
-            qty_min_x, qty_max_x = 310, 380
-            price_min_x, price_max_x = 380, 470
+        # 2. Har target item ke liye pure horizontal band me Qty aur Unit Price process karein
+        for target in targets:
+            factor = target["factor"]
+            yc = target["y_center"]
 
-        # 2. Dispo aur Comfit rows detect karna
-        detected_rows = []
-        for b in blocks:
-            b_text = b[4].upper()
-            factor = None
-            if "DISPO" in b_text:
-                factor = 50
-            elif "COMFIT" in b_text:
-                factor = 25
+            # Target item ke aas-paas ka horizontal band (+- 20 points vertical height)
+            row_words = [w for w in words if abs(((w[1] + w[3]) / 2) - yc) <= 22]
+            # Left to right arrange karein
+            row_words.sort(key=lambda x: x[0])
 
-            if factor:
-                detected_rows.append({
-                    "factor": factor,
-                    "y_top": b[1] - 4,
-                    "y_bottom": b[3] + 10
-                })
-
-        # 3. Dispo & Comfit row calculation
-        for row in detected_rows:
-            factor = row["factor"]
-            y0, y1 = row["y_top"], row["y_bottom"]
-
-            for w in words:
+            qty_found = False
+            for w in row_words:
                 w_rect = fitz.Rect(w[0], w[1], w[2], w[3])
                 w_val = w[4].replace(",", "").strip()
 
-                # Row vertical boundary ke andar
-                if y0 <= w_rect.y0 and w_rect.y1 <= y1:
-                    x0 = w_rect.x0
+                # Description aur HSN column chhod kar (x > 220)
+                if w[0] < 220:
+                    continue
 
-                    # A. QTY: Dispo me ÷50, Comfit me ÷25
-                    if qty_min_x <= x0 <= qty_max_x:
-                        if w_val.isdigit() and int(w_val) >= factor:
-                            orig_qty = int(w_val)
+                # A. QTY: Pehla integer jo HSN (8 digit) na ho
+                if not qty_found:
+                    if w_val.isdigit() and len(w_val) != 8:
+                        orig_qty = int(w_val)
+                        if orig_qty >= factor:
                             new_qty = orig_qty // factor
                             overwrite_area(page, w_rect, f"{new_qty}")
+                            qty_found = True
+                    continue
 
-                    # B. UNIT PRICE: Dispo me ×50, Comfit me ×25
-                    elif price_min_x <= x0 <= price_max_x:
-                        # Decimal rate check (jaise 1.64, 4.63, 10.50)
-                        if re.match(r"^\d+(\.\d+)?$", w_val):
-                            orig_price = float(w_val)
-                            if orig_price > 0.00:
-                                new_price = round(orig_price * factor, 2)
-                                overwrite_area(page, w_rect, f"{new_price:.2f}")
+                # B. UNIT PRICE: Qty ke theek baad aane wala pehla decimal number
+                if qty_found:
+                    # Agar number decimal me hai (jaise 1.64, 4.63, 10.45)
+                    if re.match(r"^\d+\.\d{2}$", w_val):
+                        orig_price = float(w_val)
+                        # Discount (0.00) ko chhod kar
+                        if orig_price > 0.00:
+                            new_price = round(orig_price * factor, 2)
+                            overwrite_area(page, w_rect, f"{new_price:.2f}")
+                            break  # Unit price multiply ho gayi! Aage taxable value ko touch na kare
 
-        # 4. UOM Updates
+        # 3. UOM Fixes
         for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
             for inst in page.search_for(target):
                 overwrite_area(page, inst, "UOM-BOX")
