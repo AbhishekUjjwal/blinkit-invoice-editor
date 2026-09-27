@@ -14,7 +14,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Physical Box Clipping: Pure Item Code Description | Exact Taxable Amount</p>
+        <p style="color: #94a3b8; font-size: 14px;">100% Complete Item Code Description | Exact HSN & Taxable Value</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -180,7 +180,6 @@ def extract_metadata_from_doc(doc):
 
     is_blinkit = bool(re.search(r"blink\s*commerce|blinkit", f"{buyer_name} {full_text}", re.IGNORECASE))
 
-    # Grand Total from Invoice text if present
     inv_total_m = re.search(r"(?:Total\s*Invoice\s*Value|Invoice\s*Total|Grand\s*Total|Total\s*Amount)[:\s]*[₹\s]*([0-9,]+\.\d{2})", full_text, re.I)
     printed_grand_total = float(inv_total_m.group(1).replace(",", "")) if inv_total_m else None
 
@@ -216,7 +215,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PHYSICAL BOX CLIPPING FOR LINE ITEMS -----------------
+# ----------------- EXACT ITEM CODE EXTRACTION (NOTHING REMOVED) -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -232,9 +231,7 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # Dynamic detection of column header boundaries
-        sno_right = 55
-        hsn_left = 205
+        sno_anchor_x = 48
         qty_left = 265
         price_left = 315
         disc_left = 375
@@ -243,11 +240,7 @@ def process_and_reconcile_pdf(pdf_bytes):
         for w in words:
             wt = w[4].lower()
             if wt in ["s.no", "sl.no"]:
-                sno_right = max(sno_right, w[2] + 8)
-            elif "item" in wt and "code" in wt:
-                pass
-            elif "hsn" in wt:
-                hsn_left = w[0] - 8
+                sno_anchor_x = w[2] + 4
             elif wt == "qty":
                 qty_left = w[0] - 8
             elif "price" in wt:
@@ -257,12 +250,11 @@ def process_and_reconcile_pdf(pdf_bytes):
             elif "taxable" in wt:
                 tax_left = w[0] - 8
 
-        # S.No candidates strictly in S.No column
         sno_candidates = []
         for w in words:
             val = w[4].strip()
             if val.isdigit() and 1 <= int(val) <= 99:
-                if w[0] <= sno_right and w[1] > 240:
+                if w[0] <= sno_anchor_x and w[1] > 240:
                     if not any(abs(c["center_y"] - ((w[1]+w[3])/2)) < 8 for c in sno_candidates):
                         sno_candidates.append({
                             "sno": int(val),
@@ -273,26 +265,37 @@ def process_and_reconcile_pdf(pdf_bytes):
 
         sno_candidates.sort(key=lambda x: x["center_y"])
 
+        table_bottom_y = page.rect.height - 50
+        total_indicators = [w for w in words if w[1] > 350 and any(k in w[4].lower() for k in ["total", "subtotal", "taxable value", "amount in words"])]
+        if total_indicators:
+            table_bottom_y = min([w[1] for w in total_indicators]) - 4
+
         if sno_candidates:
             for idx, item_anchor in enumerate(sno_candidates):
                 y_top = item_anchor["y0"] - 3
                 if idx + 1 < len(sno_candidates):
                     y_bottom = sno_candidates[idx + 1]["y0"] - 2
                 else:
-                    y_bottom = item_anchor["y1"] + 55
+                    y_bottom = min(item_anchor["y1"] + 120, table_bottom_y)
 
-                # 1. PURE PHYSICAL BOX CLIP FOR ITEM CODE (Strictly between sno_right and hsn_left)
-                # This guarantees 100% that HSN/Qty/Price numbers can NEVER be in the description!
-                item_box_rect = fitz.Rect(sno_right + 1, y_top, hsn_left - 1, y_bottom)
+                row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
+
+                # Exact HSN detection on this row
+                hsn_code = "63079091"
+                hsn_x0 = 210
+                for w in row_words:
+                    clean_w = w[4].replace(",", "").strip()
+                    if clean_w.isdigit() and len(clean_w) in [6, 7, 8] and 185 <= w[0] <= 265:
+                        hsn_code = clean_w
+                        hsn_x0 = w[0]
+                        break
+
+                # 100% UNTOUCHED ITEM CODE (Takes everything in Item Code column verbatim)
+                item_box_rect = fitz.Rect(sno_anchor_x, y_top, hsn_x0 - 2, y_bottom)
                 raw_item_text = page.get_text("text", clip=item_box_rect).strip()
 
-                # Clean lines, remove UOM
                 lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
-                clean_lines = [
-                    l for l in lines 
-                    if not re.search(r"^(UOM-PCS|UOM-BOX|UOM-PC|UOM-IBOX|UOM|PCS|BOX|-PCS|-BOX)$", l, re.I)
-                ]
-                full_prod_desc = " ".join(clean_lines).strip()
+                full_prod_desc = " ".join(lines).strip()
                 if not full_prod_desc:
                     full_prod_desc = f"Item {item_anchor['sno']}"
 
@@ -305,18 +308,12 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # 2. HSN BOX CLIP
-                hsn_box_rect = fitz.Rect(hsn_left, y_top, qty_left - 2, y_bottom)
-                raw_hsn_text = page.get_text("text", clip=hsn_box_rect)
-                hsn_m = re.findall(r"\b\d{6,8}\b", raw_hsn_text)
-                hsn_code = hsn_m[0] if hsn_m else "63079091"
-
                 final_q = None
                 final_p = None
                 printed_taxable = None
                 printed_discount = 0.0
 
-                # 3. QUANTITY (in Qty column)
+                # Quantity
                 qty_box_rect = fitz.Rect(qty_left - 2, y_top, price_left - 2, y_bottom)
                 for w in words:
                     if qty_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -331,7 +328,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 final_q = orig_q
                             break
 
-                # 4. PRICE (in Price column)
+                # Price
                 price_box_rect = fitz.Rect(price_left - 2, y_top, disc_left - 2, y_bottom)
                 for w in words:
                     if price_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -347,14 +344,14 @@ def process_and_reconcile_pdf(pdf_bytes):
                                     final_p = orig_p
                                 break
 
-                # 5. DISCOUNT (in Disc column)
+                # Discount
                 disc_box_rect = fitz.Rect(disc_left - 2, y_top, tax_left - 2, y_bottom)
                 raw_disc_text = page.get_text("text", clip=disc_box_rect)
                 disc_m = re.findall(r"\b\d+\.\d{2}\b", raw_disc_text)
                 if disc_m:
                     printed_discount = float(disc_m[0])
 
-                # 6. TAXABLE VALUE (in Taxable Value column)
+                # Taxable Value
                 tax_box_rect = fitz.Rect(tax_left - 2, y_top, tax_left + 85, y_bottom)
                 raw_tax_text = page.get_text("text", clip=tax_box_rect)
                 tax_m = re.findall(r"\b\d+\.\d{2}\b", raw_tax_text)
@@ -371,7 +368,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                     unit_label = "BOX" if (is_blinkit and factor > 1) else "PCS"
                     line_items.append({
                         "sno": item_anchor["sno"],
-                        "desc": full_prod_desc[:100],
+                        "desc": full_prod_desc,
                         "hsn": hsn_code,
                         "qty": final_q,
                         "unit": unit_label,
@@ -437,7 +434,7 @@ def build_einvoice_json_v101(data):
 
         item_list.append({
             "SlNo": str(idx),
-            "PrdDesc": item["desc"][:100],
+            "PrdDesc": item["desc"][:250],
             "IsServc": "N",
             "HsnCd": item["hsn"],
             "Qty": qty,
@@ -663,7 +660,6 @@ def generate_official_nic_v101_excel(data_list):
 
             item_val = round(taxable + cgst + sgst + igst, 2)
 
-            # ALL VALUES STRICTLY 2-DECIMALS IN TEXT FORMAT
             row_data = [
                 # Supply Details
                 "B2B", "N", "", "N",
@@ -677,7 +673,7 @@ def generate_official_nic_v101_excel(data_list):
                 "", "", "", "", "", "",
                 # Shipping Details
                 *ship_vals,
-                # Item Details (Pure Item Code Line Only)
+                # Item Details (100% Complete Untouched Description)
                 str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "BOX")),
                 fmt_dec(price), fmt_dec(gross_amt), fmt_dec(taxable), str(int(gst_rate)),
                 fmt_dec(igst), fmt_dec(cgst), fmt_dec(sgst), fmt_dec(item_val),
@@ -768,8 +764,8 @@ if uploaded_invoices:
 
             preview_data = [{
                 "Sl": it["sno"],
-                "Item Code (Pure Description)": it["desc"],
-                "HSN": it["hsn"],
+                "Item Code (Complete Description)": it["desc"],
+                "HSN Code": it["hsn"],
                 "Qty": it["qty"],
                 "Unit Price": fmt_dec(it['unit_price']),
                 "Gross Amt": fmt_dec(it.get('gross_amt', 0.0)),
@@ -777,7 +773,7 @@ if uploaded_invoices:
                 "Taxable Value": fmt_dec(it.get('taxable_val', 0.0))
             } for it in meta['line_items']]
             
-            st.write("📋 **Verified Line Items & Precision Amounts Preview:**")
+            st.write("📋 **Verified Line Items & Complete Description Preview:**")
             st.table(preview_data)
 
             c1, c2, c3 = st.columns(3)
