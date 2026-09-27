@@ -14,7 +14,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">100% Complete Item Code Description | Exact HSN & Taxable Value</p>
+        <p style="color: #94a3b8; font-size: 14px;">Pure Item Description (No HSN / No Qty / No Rates) | Exact Taxable Precision</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -60,6 +60,26 @@ def fmt_dec(val):
         return f"{f:.2f}"
     except (ValueError, TypeError):
         return "0.00"
+
+def purge_hsn_qty_from_desc(desc, hsn_code=None, qty=None, unit_price=None):
+    # 1. Remove exact HSN
+    if hsn_code:
+        desc = re.sub(rf"\b{re.escape(str(hsn_code))}\b", "", desc)
+    # 2. Remove any 6 to 8 digit numbers (HSN codes)
+    desc = re.sub(r"\b\d{6,8}\b", "", desc)
+    # 3. Remove exact Qty
+    if qty:
+        desc = re.sub(rf"\b{re.escape(str(qty))}\b", "", desc)
+    # 4. Remove exact Unit Price
+    if unit_price:
+        p_str = f"{float(unit_price):.2f}"
+        desc = re.sub(rf"\b{re.escape(p_str)}\b", "", desc)
+        desc = re.sub(rf"\b{re.escape(str(unit_price))}\b", "", desc)
+    # 5. Remove any floating decimal rate figures (like 23.50, 55.59)
+    desc = re.sub(r"\b\d+\.\d{2}\b", "", desc)
+    # 6. Normalize whitespace
+    desc = re.sub(r"\s+", " ", desc).strip()
+    return desc
 
 # ----------------- COORDINATE EXTRACTION -----------------
 
@@ -215,7 +235,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- EXACT ITEM CODE EXTRACTION (NOTHING REMOVED) -----------------
+# ----------------- CLEAN ITEM EXTRACTION -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -232,6 +252,7 @@ def process_and_reconcile_pdf(pdf_bytes):
         words = page.get_text("words")
 
         sno_anchor_x = 48
+        hsn_col_x = 185
         qty_left = 265
         price_left = 315
         disc_left = 375
@@ -241,6 +262,8 @@ def process_and_reconcile_pdf(pdf_bytes):
             wt = w[4].lower()
             if wt in ["s.no", "sl.no"]:
                 sno_anchor_x = w[2] + 4
+            elif "hsn" in wt:
+                hsn_col_x = w[0] - 6
             elif wt == "qty":
                 qty_left = w[0] - 8
             elif "price" in wt:
@@ -280,40 +303,22 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
-                # Exact HSN detection on this row
+                # 1. Exact HSN detection
                 hsn_code = "63079091"
-                hsn_x0 = 210
+                hsn_x0 = hsn_col_x
                 for w in row_words:
                     clean_w = w[4].replace(",", "").strip()
-                    if clean_w.isdigit() and len(clean_w) in [6, 7, 8] and 185 <= w[0] <= 265:
+                    if clean_w.isdigit() and len(clean_w) in [6, 7, 8] and 180 <= w[0] <= 265:
                         hsn_code = clean_w
-                        hsn_x0 = w[0]
+                        hsn_x0 = min(hsn_x0, w[0])
                         break
-
-                # 100% UNTOUCHED ITEM CODE (Takes everything in Item Code column verbatim)
-                item_box_rect = fitz.Rect(sno_anchor_x, y_top, hsn_x0 - 2, y_bottom)
-                raw_item_text = page.get_text("text", clip=item_box_rect).strip()
-
-                lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
-                full_prod_desc = " ".join(lines).strip()
-                if not full_prod_desc:
-                    full_prod_desc = f"Item {item_anchor['sno']}"
-
-                # Factor rule ONLY applies if Buyer is Blinkit
-                factor = 1
-                if is_blinkit:
-                    upper_desc = full_prod_desc.upper()
-                    if "DISPO" in upper_desc:
-                        factor = 50
-                    elif "COMFIT" in upper_desc:
-                        factor = 25
 
                 final_q = None
                 final_p = None
                 printed_taxable = None
                 printed_discount = 0.0
 
-                # Quantity
+                # 2. QUANTITY
                 qty_box_rect = fitz.Rect(qty_left - 2, y_top, price_left - 2, y_bottom)
                 for w in words:
                     if qty_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -321,6 +326,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         rect = fitz.Rect(w[0], w[1], w[2], w[3])
                         if val.isdigit() and len(val) != 8:
                             orig_q = int(val)
+                            factor = 50 if (is_blinkit and "DISPO" in w[4].upper()) else (25 if (is_blinkit and "COMFIT" in w[4].upper()) else 1)
                             if factor > 1 and orig_q >= factor:
                                 final_q = orig_q // factor
                                 overwrite_area(page, rect, f"{final_q}")
@@ -328,7 +334,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 final_q = orig_q
                             break
 
-                # Price
+                # 3. UNIT PRICE
                 price_box_rect = fitz.Rect(price_left - 2, y_top, disc_left - 2, y_bottom)
                 for w in words:
                     if price_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -337,6 +343,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         if re.match(r"^\d+\.\d{2}$", val):
                             orig_p = float(val)
                             if orig_p > 0.00:
+                                factor = 50 if (is_blinkit and "DISPO" in w[4].upper()) else (25 if (is_blinkit and "COMFIT" in w[4].upper()) else 1)
                                 if factor > 1:
                                     final_p = round(orig_p * factor, 2)
                                     overwrite_area(page, rect, f"{final_p:.2f}")
@@ -344,19 +351,41 @@ def process_and_reconcile_pdf(pdf_bytes):
                                     final_p = orig_p
                                 break
 
-                # Discount
+                # 4. DISCOUNT
                 disc_box_rect = fitz.Rect(disc_left - 2, y_top, tax_left - 2, y_bottom)
                 raw_disc_text = page.get_text("text", clip=disc_box_rect)
                 disc_m = re.findall(r"\b\d+\.\d{2}\b", raw_disc_text)
                 if disc_m:
                     printed_discount = float(disc_m[0])
 
-                # Taxable Value
+                # 5. TAXABLE VALUE
                 tax_box_rect = fitz.Rect(tax_left - 2, y_top, tax_left + 85, y_bottom)
                 raw_tax_text = page.get_text("text", clip=tax_box_rect)
                 tax_m = re.findall(r"\b\d+\.\d{2}\b", raw_tax_text)
                 if tax_m:
                     printed_taxable = float(tax_m[0])
+
+                # 6. PURE ITEM CODE (Box strictly clipped before HSN column)
+                item_right_boundary = min(hsn_x0 - 4, 180)
+                item_box_rect = fitz.Rect(sno_anchor_x, y_top, item_right_boundary, y_bottom)
+                raw_item_text = page.get_text("text", clip=item_box_rect).strip()
+
+                lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
+                raw_full_desc = " ".join(lines).strip()
+
+                # SANITIZE: REMOVE ANY LEAKED HSN, QTY, OR RATES
+                clean_desc = purge_hsn_qty_from_desc(raw_full_desc, hsn_code=hsn_code, qty=final_q, unit_price=final_p)
+                if not clean_desc:
+                    clean_desc = f"Item {item_anchor['sno']}"
+
+                # Blinkit factor calculation for line items
+                factor = 1
+                if is_blinkit:
+                    upper_desc = clean_desc.upper()
+                    if "DISPO" in upper_desc:
+                        factor = 50
+                    elif "COMFIT" in upper_desc:
+                        factor = 25
 
                 if final_q is not None and final_p is not None:
                     gross_amt = round(final_q * final_p, 2)
@@ -368,7 +397,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                     unit_label = "BOX" if (is_blinkit and factor > 1) else "PCS"
                     line_items.append({
                         "sno": item_anchor["sno"],
-                        "desc": full_prod_desc,
+                        "desc": clean_desc,
                         "hsn": hsn_code,
                         "qty": final_q,
                         "unit": unit_label,
@@ -673,7 +702,7 @@ def generate_official_nic_v101_excel(data_list):
                 "", "", "", "", "", "",
                 # Shipping Details
                 *ship_vals,
-                # Item Details (100% Complete Untouched Description)
+                # Item Details (Pure Description: No HSN / No Qty / No Rate inside)
                 str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "BOX")),
                 fmt_dec(price), fmt_dec(gross_amt), fmt_dec(taxable), str(int(gst_rate)),
                 fmt_dec(igst), fmt_dec(cgst), fmt_dec(sgst), fmt_dec(item_val),
@@ -764,7 +793,7 @@ if uploaded_invoices:
 
             preview_data = [{
                 "Sl": it["sno"],
-                "Item Code (Complete Description)": it["desc"],
+                "Item Code (Pure Description)": it["desc"],
                 "HSN Code": it["hsn"],
                 "Qty": it["qty"],
                 "Unit Price": fmt_dec(it['unit_price']),
@@ -773,7 +802,7 @@ if uploaded_invoices:
                 "Taxable Value": fmt_dec(it.get('taxable_val', 0.0))
             } for it in meta['line_items']]
             
-            st.write("📋 **Verified Line Items & Complete Description Preview:**")
+            st.write("📋 **Verified Line Items (Clean Description, No HSN/Qty Inside):**")
             st.table(preview_data)
 
             c1, c2, c3 = st.columns(3)
