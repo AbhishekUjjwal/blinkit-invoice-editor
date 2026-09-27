@@ -14,7 +14,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Dynamic HSN Column Anchoring | Pure Item Code Description | Exact Precision</p>
+        <p style="color: #94a3b8; font-size: 14px;">Blinkit 50x/25x Box Formula Active | Pure Description | Exact HSN & Precision</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -201,6 +201,7 @@ def extract_metadata_from_doc(doc):
     pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*[A-Za-z\s\-]*(\d{2})", full_text, re.IGNORECASE)
     buyer_pos = pos_match.group(1).strip() if pos_match else buyer_state_code
 
+    # STRICT CHECK FOR BLINKIT BUYER
     is_blinkit = bool(re.search(r"blink\s*commerce|blinkit", f"{buyer_name} {full_text}", re.IGNORECASE))
 
     inv_total_m = re.search(r"(?:Total\s*Invoice\s*Value|Invoice\s*Total|Grand\s*Total|Total\s*Amount)[:\s]*[₹\s]*([0-9,]+\.\d{2})", full_text, re.I)
@@ -238,7 +239,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PARSING WITH DYNAMIC HSN COLUMN ANCHOR -----------------
+# ----------------- PARSING WITH BLINKIT 50x / 25x FORMULA -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -254,7 +255,6 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # 1. DYNAMIC HEADER COLUMN ANCHORS
         sno_anchor_x = 48
         hsn_min_x = 185
         hsn_max_x = 265
@@ -268,7 +268,6 @@ def process_and_reconcile_pdf(pdf_bytes):
             if wt in ["s.no", "sl.no", "s.no."]:
                 sno_anchor_x = w[2] + 4
             elif wt == "hsn":
-                # Pinpoint exact HSN column boundaries from header position
                 hsn_min_x = w[0] - 12
                 hsn_max_x = w[2] + 35
             elif wt == "qty":
@@ -280,7 +279,6 @@ def process_and_reconcile_pdf(pdf_bytes):
             elif "taxable" in wt:
                 tax_left = w[0] - 8
 
-        # 2. S.NO CANDIDATE ROWS
         sno_candidates = []
         for w in words:
             val = w[4].strip()
@@ -311,7 +309,7 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
-                # 3. EXACT HSN CODE EXTRACTION (Directly clipped from HSN Column)
+                # 1. HSN Code
                 hsn_box_rect = fitz.Rect(hsn_min_x, y_top, hsn_max_x, y_bottom)
                 hsn_clip_text = page.get_text("text", clip=hsn_box_rect)
                 hsn_matches = re.findall(r"\b(\d{6,8})\b", hsn_clip_text)
@@ -319,7 +317,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 if hsn_matches:
                     hsn_code = hsn_matches[0]
                 else:
-                    # Search inside row words aligned around HSN column
                     candidates = [
                         w[4].replace(",", "").strip() for w in row_words 
                         if (hsn_min_x - 15) <= w[0] <= (hsn_max_x + 15) and w[4].replace(",", "").strip().isdigit()
@@ -327,19 +324,39 @@ def process_and_reconcile_pdf(pdf_bytes):
                     valid_hsns = [c for c in candidates if len(c) in [6, 7, 8]]
                     hsn_code = valid_hsns[0] if valid_hsns else "63079091"
 
-                # Find exact X position of this row's HSN to lock item code's right border
                 actual_hsn_x = hsn_min_x
                 for w in row_words:
                     if w[4].replace(",", "").strip() == hsn_code:
                         actual_hsn_x = min(actual_hsn_x, w[0])
                         break
 
+                # 2. Item Description
+                item_right_boundary = actual_hsn_x - 4
+                item_box_rect = fitz.Rect(sno_anchor_x, y_top, item_right_boundary, y_bottom)
+                raw_item_text = page.get_text("text", clip=item_box_rect).strip()
+
+                lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
+                raw_desc = " ".join(lines).strip()
+
+                pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code)
+                if not pure_desc:
+                    pure_desc = f"Item {item_anchor['sno']}"
+
+                # 3. BLINKIT FACTOR FORMULA (DISPO -> 50, COMFIT -> 25)
+                factor = 1
+                if is_blinkit:
+                    upper_desc = pure_desc.upper()
+                    if "DISPO" in upper_desc:
+                        factor = 50
+                    elif "COMFIT" in upper_desc:
+                        factor = 25
+
                 final_q = None
                 final_p = None
                 printed_taxable = None
                 printed_discount = 0.0
 
-                # 4. QUANTITY
+                # 4. Quantity (Reconciled with Factor if Blinkit)
                 qty_box_rect = fitz.Rect(qty_left - 2, y_top, price_left - 2, y_bottom)
                 for w in words:
                     if qty_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -347,7 +364,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                         rect = fitz.Rect(w[0], w[1], w[2], w[3])
                         if val.isdigit() and len(val) != 8:
                             orig_q = int(val)
-                            factor = 50 if (is_blinkit and "DISPO" in w[4].upper()) else (25 if (is_blinkit and "COMFIT" in w[4].upper()) else 1)
                             if factor > 1 and orig_q >= factor:
                                 final_q = orig_q // factor
                                 overwrite_area(page, rect, f"{final_q}")
@@ -355,7 +371,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 final_q = orig_q
                             break
 
-                # 5. UNIT PRICE
+                # 5. Price (Multiplied with Factor if Blinkit)
                 price_box_rect = fitz.Rect(price_left - 2, y_top, disc_left - 2, y_bottom)
                 for w in words:
                     if price_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -364,7 +380,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                         if re.match(r"^\d+\.\d{2}$", val):
                             orig_p = float(val)
                             if orig_p > 0.00:
-                                factor = 50 if (is_blinkit and "DISPO" in w[4].upper()) else (25 if (is_blinkit and "COMFIT" in w[4].upper()) else 1)
                                 if factor > 1:
                                     final_p = round(orig_p * factor, 2)
                                     overwrite_area(page, rect, f"{final_p:.2f}")
@@ -372,39 +387,19 @@ def process_and_reconcile_pdf(pdf_bytes):
                                     final_p = orig_p
                                 break
 
-                # 6. DISCOUNT
+                # 6. Discount
                 disc_box_rect = fitz.Rect(disc_left - 2, y_top, tax_left - 2, y_bottom)
                 raw_disc_text = page.get_text("text", clip=disc_box_rect)
                 disc_m = re.findall(r"\b\d+\.\d{2}\b", raw_disc_text)
                 if disc_m:
                     printed_discount = float(disc_m[0])
 
-                # 7. TAXABLE VALUE
+                # 7. Taxable Value
                 tax_box_rect = fitz.Rect(tax_left - 2, y_top, tax_left + 85, y_bottom)
                 raw_tax_text = page.get_text("text", clip=tax_box_rect)
                 tax_m = re.findall(r"\b\d+\.\d{2}\b", raw_tax_text)
                 if tax_m:
                     printed_taxable = float(tax_m[0])
-
-                # 8. PURE ITEM CODE (Boundary strictly locked left of actual HSN start)
-                item_right_boundary = actual_hsn_x - 4
-                item_box_rect = fitz.Rect(sno_anchor_x, y_top, item_right_boundary, y_bottom)
-                raw_item_text = page.get_text("text", clip=item_box_rect).strip()
-
-                lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
-                raw_desc = " ".join(lines).strip()
-
-                pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code, qty=final_q, unit_price=final_p)
-                if not pure_desc:
-                    pure_desc = f"Item {item_anchor['sno']}"
-
-                factor = 1
-                if is_blinkit:
-                    upper_desc = pure_desc.upper()
-                    if "DISPO" in upper_desc:
-                        factor = 50
-                    elif "COMFIT" in upper_desc:
-                        factor = 25
 
                 if final_q is not None and final_p is not None:
                     gross_amt = round(final_q * final_p, 2)
@@ -427,6 +422,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "gst_rate": 5.0
                     })
 
+        # Overwrite UOM to BOX for Blinkit
         if is_blinkit:
             for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
                 for inst in page.search_for(target):
@@ -721,7 +717,7 @@ def generate_official_nic_v101_excel(data_list):
                 "", "", "", "", "", "",
                 # Shipping Details
                 *ship_vals,
-                # Item Details (Pure Description & Exact Dynamic HSN Code)
+                # Item Details (Blinkit 50x/25x Box Formula Active + Clean Description)
                 str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "BOX")),
                 fmt_dec(price), fmt_dec(gross_amt), fmt_dec(taxable), str(int(gst_rate)),
                 fmt_dec(igst), fmt_dec(cgst), fmt_dec(sgst), fmt_dec(item_val),
@@ -796,17 +792,19 @@ if uploaded_invoices:
             json_payload = build_einvoice_json_v101(meta)
             inv_no = meta["invoice_no"]
             pdf_name = meta["pdf_filename"]
+            is_blinkit = meta["is_blinkit"]
 
+            channel_badge = "🟢 Blinkit Conversion Active (50x/25x Box Fix)" if is_blinkit else "🔵 Standard Buyer (Original Data Preserved)"
             ship_status = "⚠️ Different (Shipping Details Filled)" if meta["shipping_is_different"] else "✅ Same (Shipping Blank in Excel)"
 
             tot_tax = sum([it['taxable_val'] for it in meta['line_items']])
             disp_total = meta['printed_grand_total'] if meta['printed_grand_total'] else round(tot_tax * 1.05, 2)
 
             st.markdown(f"""
-                <div style="background-color: #1e293b; padding: 14px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #3b82f6;">
-                    <b>Buyer Name:</b> <code>{meta['buyer_name']}</code> &nbsp;|&nbsp; <b>City:</b> <code>{meta['buyer_loc']}</code> ({meta['buyer_pin']})<br>
-                    <b>Shipping Status:</b> <code>{ship_status}</code> &nbsp;|&nbsp; <b>Total Invoice Value:</b> <code>₹{disp_total:.2f}</code><br>
-                    <b>Seller:</b> {meta['seller_name']} ({meta['seller_gstin']})
+                <div style="background-color: #1e293b; padding: 14px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid {'#10b981' if is_blinkit else '#3b82f6'};">
+                    <b>Buyer Name:</b> <code>{meta['buyer_name']}</code> &nbsp;|&nbsp; <b>Rule:</b> <code>{channel_badge}</code><br>
+                    <b>City:</b> <code>{meta['buyer_loc']}</code> ({meta['buyer_pin']}) &nbsp;|&nbsp; <b>Shipping Status:</b> <code>{ship_status}</code><br>
+                    <b>Seller:</b> {meta['seller_name']} ({meta['seller_gstin']}) &nbsp;|&nbsp; <b>Total Invoice Value:</b> <code>₹{disp_total:.2f}</code>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -815,13 +813,14 @@ if uploaded_invoices:
                 "Item Code (Pure Description)": it["desc"],
                 "HSN Code": it["hsn"],
                 "Qty": it["qty"],
+                "Unit": it["unit"],
                 "Unit Price": fmt_dec(it['unit_price']),
                 "Gross Amt": fmt_dec(it.get('gross_amt', 0.0)),
                 "Discount": fmt_dec(it.get('discount', 0.0)),
                 "Taxable Value": fmt_dec(it.get('taxable_val', 0.0))
             } for it in meta['line_items']]
             
-            st.write("📋 **Verified Line Items (Dynamic HSN & Clean Description):**")
+            st.write("📋 **Verified Line Items Preview:**")
             st.table(preview_data)
 
             c1, c2, c3 = st.columns(3)
