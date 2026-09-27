@@ -14,7 +14,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Accurate City, Shipping Box Sync, Exact Item Description & Printed Taxable Value</p>
+        <p style="color: #94a3b8; font-size: 14px;">Smart Shipping Address Detection | Full Party Name | Exact Discount & Taxable Value</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -40,7 +40,6 @@ MAJOR_CITIES = [
 ]
 
 def clean_extracted_city(text, state_name):
-    # Match pattern: City, State-Pincode
     m = re.search(r"([A-Za-z\s]+),\s*(?:[A-Za-z\s]+)[\-\s]*[0-9]{6}", text)
     if m:
         c_cand = m.group(1).strip()
@@ -55,7 +54,7 @@ def clean_extracted_city(text, state_name):
 
     return state_name.title() if state_name else "Delhi"
 
-# ----------------- COORDINATE EXTRACTION (SELLER, BUYER & SHIPPING) -----------------
+# ----------------- COORDINATE EXTRACTION -----------------
 
 def extract_metadata_from_doc(doc):
     full_text = ""
@@ -101,19 +100,20 @@ def extract_metadata_from_doc(doc):
     clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
     pdf_filename = f"{clean_ext}_{clean_inv}_{clean_dt}.pdf"
 
-    # Coordinates Detection for Headers
+    # Y-Coordinates
     sold_header = [w for w in words if "sold" in w[4].lower()]
     bill_header = [w for w in words if "billing" in w[4].lower()]
-    ship_header = [w for w in words if "shipping" in w[4].lower()]
     table_header = [w for w in words if w[4].lower() in ["s.no", "sl.no", "item", "hsn"]]
 
     y_sold = sold_header[0][1] if sold_header else 80
     y_bill = bill_header[0][1] if bill_header else 215
     y_table = table_header[0][1] if table_header else 340
-    mid_x = ship_header[0][0] - 10 if ship_header else 310
 
-    # 4. SELLER EXTRACTION (Top-Left Box)
-    seller_rect = fitz.Rect(20, y_sold, mid_x, y_bill)
+    # Strict Column Partition (Fixed Left: 20-300, Fixed Right: 305-585)
+    split_x = 300
+
+    # 4. SELLER DETAILS (Sold By Box)
+    seller_rect = fitz.Rect(20, y_sold, split_x, y_bill)
     seller_text = page0.get_text("text", clip=seller_rect).strip()
     s_lines = [l.strip() for l in seller_text.split("\n") if l.strip() and not re.search(r"sold\s*by", l, re.I)]
     seller_name = s_lines[0] if s_lines else "Romsons Prime Private Limited"
@@ -123,18 +123,17 @@ def extract_metadata_from_doc(doc):
 
     s_pin = re.findall(r"\b[1-9][0-9]{5}\b", seller_text)
     seller_pin = int(s_pin[0]) if s_pin else 110028
-
     seller_state_code = seller_gstin[:2]
     seller_loc = clean_extracted_city(seller_text, STATE_CODE_MAP.get(seller_state_code, "Delhi"))
 
-    # 5. BUYER DETAILS (Strictly Left Box: x: 20 to mid_x, y: y_bill to y_table)
-    billing_rect = fitz.Rect(20, y_bill, mid_x, y_table)
+    # 5. BUYER DETAILS (Billing Box: x: 20 to 300)
+    billing_rect = fitz.Rect(20, y_bill, split_x, y_table)
     billing_text = page0.get_text("text", clip=billing_rect).strip()
     b_lines = [l.strip() for l in billing_text.split("\n") if l.strip() and not re.search(r"billing\s*addr", l, re.I)]
 
     buyer_name = b_lines[0] if b_lines else "BUYER ENTERPRISE"
-    addr_candidates = [l for l in b_lines[1:] if not re.search(r"(@|contact|phone|mob|gstin|pan|india)", l, re.I)]
-    buyer_addr1 = ", ".join(addr_candidates[:2]) if addr_candidates else (b_lines[1] if len(b_lines) > 1 else "Commercial Facility")
+    b_addr_candidates = [l for l in b_lines[1:] if not re.search(r"(@|contact|phone|mob|gstin|pan|india)", l, re.I)]
+    buyer_addr1 = ", ".join(b_addr_candidates[:2]) if b_addr_candidates else (b_lines[1] if len(b_lines) > 1 else "Commercial Facility")
 
     em_m = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", billing_text)
     buyer_email = em_m.group(0).strip() if em_m else ""
@@ -154,17 +153,16 @@ def extract_metadata_from_doc(doc):
 
     b_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", billing_text)
     buyer_pin = int(b_pin_m[0]) if b_pin_m else int(buyer_state_code + "0001")
-
     buyer_loc = clean_extracted_city(billing_text, buyer_state_name)
 
-    # 6. SHIPPING DETAILS (Strictly Right Box: x: mid_x to 580, y: y_bill to y_table)
-    shipping_rect = fitz.Rect(mid_x, y_bill, 590, y_table)
+    # 6. SHIPPING DETAILS (Strictly Right Box: x: 305 to 585)
+    shipping_rect = fitz.Rect(split_x + 5, y_bill, 585, y_table)
     shipping_text = page0.get_text("text", clip=shipping_rect).strip()
     shp_lines = [l.strip() for l in shipping_text.split("\n") if l.strip() and not re.search(r"shipping\s*addr", l, re.I)]
 
     ship_name = shp_lines[0] if shp_lines else buyer_name
-    ship_addr_candidates = [l for l in shp_lines[1:] if not re.search(r"(@|contact|phone|mob|gstin|pan|india)", l, re.I)]
-    ship_addr1 = ", ".join(ship_addr_candidates[:2]) if ship_addr_candidates else (shp_lines[1] if len(shp_lines) > 1 else buyer_addr1)
+    s_addr_candidates = [l for l in shp_lines[1:] if not re.search(r"(@|contact|phone|mob|gstin|pan|india)", l, re.I)]
+    ship_addr1 = ", ".join(s_addr_candidates[:2]) if s_addr_candidates else (shp_lines[1] if len(shp_lines) > 1 else buyer_addr1)
 
     shp_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", shipping_text, re.IGNORECASE)
     ship_gstin = shp_gst_m.group(1).strip() if shp_gst_m else buyer_gstin
@@ -173,10 +171,16 @@ def extract_metadata_from_doc(doc):
 
     shp_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", shipping_text)
     ship_pin = int(shp_pin_m[0]) if shp_pin_m else buyer_pin
-
     ship_loc = clean_extracted_city(shipping_text, ship_state_name)
 
-    # Place of Supply (POS) - 2 Digit Code
+    # 7. SMART SHIPPING CHECK: Are Billing and Shipping Different?
+    clean_b_str = re.sub(r'[^A-Za-z0-9]', '', f"{buyer_addr1}{buyer_pin}").lower()
+    clean_s_str = re.sub(r'[^A-Za-z0-9]', '', f"{ship_addr1}{ship_pin}").lower()
+
+    # If address or pincode is different, shipping details are active
+    shipping_is_different = (clean_b_str != clean_s_str) and (buyer_pin != ship_pin or buyer_addr1 != ship_addr1)
+
+    # Place of Supply (POS)
     pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*[A-Za-z\s\-]*(\d{2})", full_text, re.IGNORECASE)
     buyer_pos = pos_match.group(1).strip() if pos_match else buyer_state_code
 
@@ -202,6 +206,7 @@ def extract_metadata_from_doc(doc):
         "buyer_state_code": buyer_state_code,
         "buyer_state_name": buyer_state_name,
         "buyer_pos": buyer_pos,
+        "shipping_is_different": shipping_is_different,
         "ship_name": ship_name,
         "ship_addr1": ship_addr1,
         "ship_loc": ship_loc,
@@ -212,7 +217,7 @@ def extract_metadata_from_doc(doc):
         "is_blinkit": is_blinkit
     }
 
-# ----------------- TABLE EXTRACTION & EXACT TAXABLE VALUE CALCULATION -----------------
+# ----------------- TABLE EXTRACTION & EXACT TAXABLE VALUE -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -228,7 +233,6 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # Find Column Horizontal Bounds
         sno_col = (20, 60)
         item_col = (60, 240)
         hsn_col = (240, 310)
@@ -254,7 +258,6 @@ def process_and_reconcile_pdf(pdf_bytes):
             elif "taxable" in wt:
                 taxable_col = (w[0] - 15, w[2] + 50)
 
-        # Detect Serial Numbers (1, 2, 3...)
         sno_candidates = []
         for w in words:
             val = w[4].strip()
@@ -279,16 +282,14 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
-                # Full Item Code / Product Description (Preserve everything printed under Item Code)
+                # Full Item Code / Product Description
                 desc_tokens = [w for w in row_words if item_col[0] <= w[0] <= item_col[1]]
                 desc_tokens.sort(key=lambda x: (x[1], x[0]))
-                
                 desc_parts = [w[4] for w in desc_tokens if not re.search(r"^(UOM-PCS|UOM-BOX|UOM-PC|UOM-IBOX)$", w[4], re.I)]
                 full_prod_desc = " ".join(desc_parts).strip()
                 if not full_prod_desc:
                     full_prod_desc = f"Item {item_anchor['sno']}"
 
-                # Factor rule ONLY applies if Buyer is Blinkit
                 factor = 1
                 if is_blinkit:
                     upper_desc = full_prod_desc.upper()
@@ -297,7 +298,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # HSN Code
                 hsn_code = "63079091"
                 for w in row_words:
                     clean_w = w[4].replace(",", "").strip()
@@ -311,7 +311,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 printed_taxable = None
                 printed_discount = 0.0
 
-                # Quantity
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -324,7 +323,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                             else:
                                 final_q = orig_q
 
-                # Unit Price
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -338,14 +336,12 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 else:
                                     final_p = orig_p
 
-                # Discount
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     if disc_col[0] <= w[0] <= disc_col[1]:
                         if re.match(r"^\d+\.\d{2}$", val):
                             printed_discount = float(val)
 
-                # Actual Printed Taxable Value
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     if taxable_col[0] <= w[0] <= taxable_col[1]:
@@ -354,8 +350,6 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 if final_q is not None and final_p is not None:
                     gross_amt = round(final_q * final_p, 2)
-                    
-                    # If invoice has printed taxable value, use it; otherwise gross - discount
                     if printed_taxable is not None and printed_taxable > 0:
                         taxable_val = printed_taxable
                     else:
@@ -450,6 +444,18 @@ def build_einvoice_json_v101(data):
 
     total_inv_val = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
 
+    ship_dtls = None
+    if data.get("shipping_is_different", False):
+        ship_dtls = {
+            "Gstin": data["ship_gstin"],
+            "LglNm": data["ship_name"],
+            "TrdNm": data["ship_name"],
+            "Addr1": data["ship_addr1"][:100],
+            "Loc": data["ship_loc"],
+            "Pin": data["ship_pin"],
+            "Stcd": data["ship_state_code"]
+        }
+
     return {
         "Version": "1.01",
         "TranDtls": {
@@ -484,15 +490,7 @@ def build_einvoice_json_v101(data):
             "Stcd": buyer_pos
         },
         "DispDtls": None,
-        "ShipDtls": {
-            "Gstin": data["ship_gstin"],
-            "LglNm": data["ship_name"],
-            "TrdNm": data["ship_name"],
-            "Addr1": data["ship_addr1"][:100],
-            "Loc": data["ship_loc"],
-            "Pin": data["ship_pin"],
-            "Stcd": data["ship_state_code"]
-        },
+        "ShipDtls": ship_dtls,
         "ItemList": item_list,
         "ValDtls": {
             "AssVal": round(tot_taxable, 2),
@@ -506,7 +504,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- OFFICIAL NIC v1.01 EXCEL BUILDER (WITH SHIPPING FILLED) -----------------
+# ----------------- OFFICIAL NIC v1.01 EXCEL BUILDER -----------------
 
 def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
@@ -624,6 +622,16 @@ def generate_official_nic_v101_excel(data_list):
 
         tot_inv_val = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
 
+        # Shipping details condition: Fill ONLY if different from Billing
+        if inv.get("shipping_is_different", False):
+            ship_vals = [
+                inv["ship_gstin"], inv["ship_name"], inv["ship_name"],
+                inv["ship_addr1"], "", inv["ship_loc"], inv["ship_pin"], inv["ship_state_name"]
+            ]
+        else:
+            # Leave completely blank if identical/same
+            ship_vals = ["", "", "", "", "", "", "", ""]
+
         for s_no, it in enumerate(inv["line_items"], 1):
             qty = it["qty"]
             price = it["unit_price"]
@@ -653,9 +661,9 @@ def generate_official_nic_v101_excel(data_list):
                 inv["buyer_state_name"], inv["buyer_phone"], inv["buyer_email"],
                 # Dispatch Details (Blank)
                 "", "", "", "", "", "",
-                # Shipping Details (Now Filled Accurately!)
-                inv["ship_gstin"], inv["ship_name"], inv["ship_name"], inv["ship_addr1"], "", inv["ship_loc"], inv["ship_pin"], inv["ship_state_name"],
-                # Item Details (Exact Matching Description, Gross Amount & Printed Taxable Value)
+                # Shipping Details (Conditional: Filled only if different, else blank)
+                *ship_vals,
+                # Item Details
                 s_no, it["desc"], "N", it["hsn"], qty, it.get("unit", "BOX"), price,
                 gross_amt, taxable, gst_rate, igst, cgst, sgst, item_val,
                 # Invoice Value Details
@@ -702,7 +710,7 @@ def generate_official_nic_v101_excel(data_list):
     out_io.seek(0)
     return out_io
 
-# ----------------- MAIN WORKFLOW -----------------
+# ----------------- MAIN STREAMLIT WORKFLOW -----------------
 
 if uploaded_invoices:
     processed_docs = []
@@ -732,10 +740,12 @@ if uploaded_invoices:
             inv_no = meta["invoice_no"]
             pdf_name = meta["pdf_filename"]
 
+            ship_status = "⚠️ Different (Shipping Details Filled)" if meta["shipping_is_different"] else "✅ Same (Shipping Blank in Excel)"
+
             st.markdown(f"""
                 <div style="background-color: #1e293b; padding: 14px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #3b82f6;">
-                    <b>Buyer Name:</b> <code>{meta['buyer_name']}</code> &nbsp;|&nbsp; <b>Location:</b> <code>{meta['buyer_loc']}</code> ({meta['buyer_pin']})<br>
-                    <b>Shipping Name:</b> <code>{meta['ship_name']}</code> &nbsp;|&nbsp; <b>Shipping Loc:</b> <code>{meta['ship_loc']}</code> ({meta['ship_pin']})<br>
+                    <b>Buyer Name:</b> <code>{meta['buyer_name']}</code> &nbsp;|&nbsp; <b>City:</b> <code>{meta['buyer_loc']}</code> ({meta['buyer_pin']})<br>
+                    <b>Shipping Address Status:</b> <code>{ship_status}</code><br>
                     <b>Seller:</b> {meta['seller_name']} ({meta['seller_gstin']})
                 </div>
             """, unsafe_allow_html=True)
