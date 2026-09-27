@@ -9,12 +9,12 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="Universal Dynamic e-Invoice Suite", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Universal Invoice & e-Invoice Suite", page_icon="⚡", layout="wide")
 
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-SKU e-Invoice Gateway</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Smart Blinkit Conversion Rules | PDF Reconcile + NIC v1.01 Bulk Excel + e-Invoice JSON</p>
+        <p style="color: #94a3b8; font-size: 14px;">Accurate Billing Box Coordinates | PDF Reconcile + NIC v1.01 Bulk Excel + e-Invoice JSON</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -33,11 +33,19 @@ STATE_CODE_MAP = {
     "38": "LADAKH"
 }
 
-# ----------------- 100% DYNAMIC METADATA EXTRACTION -----------------
+# ----------------- COORDINATE-BASED ACCURATE EXTRACTION -----------------
 
-def extract_metadata(full_text):
+def extract_metadata_from_doc(doc):
+    full_text = ""
+    for p in doc:
+        full_text += p.get_text() + "\n"
+
+    page0 = doc[0]
+    words = page0.get_text("words")
+
+    # 1. External Order ID
     ext_order_id = None
-    ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\s]{8,25})", full_text, re.IGNORECASE)
+    ext_match = re.search(r"Extern(?:al)?\s*Order\s*(?:No\.?|ID)?\s*[:\s]*([0-9\sA-Za-z]{8,35})", full_text, re.IGNORECASE)
     if ext_match:
         ext_order_id = "".join(ext_match.group(1).split())
     if not ext_order_id:
@@ -47,9 +55,11 @@ def extract_metadata(full_text):
     if not ext_order_id:
         ext_order_id = "ExtOrder"
 
+    # 2. Invoice No
     inv_match = re.search(r"Invoice\s*No\s*[:\s]*([A-Za-z0-9\-_/]+)", full_text, re.IGNORECASE)
     invoice_no = inv_match.group(1).strip() if inv_match else "INV-001"
 
+    # 3. Invoice Date
     date_match = re.search(r"Invoice\s*Date\s*[:\s]*([A-Za-z0-9,\s\.\-\/]+?)(?=\n|Ship\s*Date|$)", full_text, re.IGNORECASE)
     raw_date = date_match.group(1).strip() if date_match else "Date"
 
@@ -69,34 +79,43 @@ def extract_metadata(full_text):
     clean_dt = re.sub(r'[^A-Za-z0-9\-_]', '', clean_date)
     pdf_filename = f"{clean_ext}_{clean_inv}_{clean_dt}.pdf"
 
-    # Dynamic Seller Extraction
-    seller_name = "SELLER ENTERPRISE"
-    seller_gstin = ""
+    # 4. Seller Details (Sold By Box: Top-Left, y: 70 to 220, x: 20 to 300)
+    seller_name = "Romsons Prime Private Limited"
+    seller_gstin = "07AALCR5906L1ZW"
     seller_pin = 110028
 
-    seller_block_m = re.search(r"(?:Sold\s*By|Seller\s*Details|From)[:\s]*\n(.*?)(?=\n\s*(?:Billing|Billed|Order\s*No|Invoice\s*No|\Z))", full_text, re.DOTALL | re.IGNORECASE)
-    if seller_block_m:
-        s_block = seller_block_m.group(1).strip()
-        s_lines = [l.strip() for l in s_block.split("\n") if l.strip()]
-        if len(s_lines) > 0:
-            seller_name = s_lines[0]
+    sold_header = [w for w in words if "sold" in w[4].lower()]
+    bill_header = [w for w in words if "billing" in w[4].lower()]
 
-        s_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", s_block, re.IGNORECASE)
-        if s_gst_m:
-            seller_gstin = s_gst_m.group(1).strip()
+    y_sold = sold_header[0][1] if sold_header else 80
+    y_bill = bill_header[0][1] if bill_header else 215
 
-        s_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", s_block)
-        if s_pin_m:
-            seller_pin = int(s_pin_m[0])
+    # Crop Seller text strictly from top-left box
+    seller_rect = fitz.Rect(20, y_sold, 310, y_bill)
+    seller_text = page0.get_text("text", clip=seller_rect).strip()
+    s_lines = [l.strip() for l in seller_text.split("\n") if l.strip() and not re.search(r"sold\s*by", l, re.I)]
+    if len(s_lines) > 0:
+        seller_name = s_lines[0]
 
-    if not seller_gstin:
-        all_gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
-        seller_gstin = all_gstins[0] if len(all_gstins) > 0 else "07AALCR5906L1ZW"
+    s_gst = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", seller_text, re.I)
+    if s_gst:
+        seller_gstin = s_gst.group(1).strip()
+    s_pin = re.findall(r"\b[1-9][0-9]{5}\b", seller_text)
+    if s_pin:
+        seller_pin = int(s_pin[0])
 
     seller_state_code = seller_gstin[:2]
     seller_loc = STATE_CODE_MAP.get(seller_state_code, "Delhi").title()
 
-    # Dynamic Buyer Extraction
+    # 5. BUYER DETAILS: CROP STRICTLY LEFT "Billing Address" BOX (x: 20 to 310, y: y_bill to item table)
+    # This prevents any text from the right "Shipping Address" box from ever mixing in!
+    table_header = [w for w in words if w[4].lower() in ["s.no", "sl.no", "item", "hsn"]]
+    y_table = table_header[0][1] if table_header else 340
+
+    billing_rect = fitz.Rect(20, y_bill, 310, y_table)
+    billing_text = page0.get_text("text", clip=billing_rect).strip()
+    b_lines = [l.strip() for l in billing_text.split("\n") if l.strip() and not re.search(r"billing\s*addr", l, re.I)]
+
     buyer_name = "BUYER ENTERPRISE"
     buyer_addr1 = "Commercial Facility"
     buyer_loc = ""
@@ -105,38 +124,40 @@ def extract_metadata(full_text):
     buyer_email = ""
     buyer_gstin = ""
 
-    buyer_block_m = re.search(r"(?:Billing\s*Addr[a-z]*|Billed\s*To|Buyer\s*Details|Customer\s*Details)[:\s]*\n(.*?)(?=\n\s*(?:Shipping|Ship\s*To|S\.No|Item Code|H\s*S\s*N|\Z))", full_text, re.DOTALL | re.IGNORECASE)
-    if buyer_block_m:
-        b_block = buyer_block_m.group(1).strip()
-        b_lines = [l.strip() for l in b_block.split("\n") if l.strip()]
+    if len(b_lines) > 0:
+        buyer_name = b_lines[0]
+    if len(b_lines) > 1:
+        # Filter out email/phone/gstin lines from address line 1
+        addr_candidates = [l for l in b_lines[1:] if not re.search(r"(@|contact|phone|mob|gstin|pan|india)", l, re.I)]
+        buyer_addr1 = ", ".join(addr_candidates[:2]) if addr_candidates else b_lines[1]
 
-        if len(b_lines) > 0:
-            buyer_name = b_lines[0]
-        if len(b_lines) > 1:
-            buyer_addr1 = b_lines[1]
+    # Email
+    em_m = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", billing_text)
+    if em_m:
+        buyer_email = em_m.group(0).strip()
 
-        em_m = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", b_block)
-        if em_m:
-            buyer_email = em_m.group(0).strip()
+    # Phone / Contact
+    ph_m = re.search(r"(?:Contact|Phone|Mob)?\s*[:\s]*([6-9]\d{9})", billing_text, re.IGNORECASE)
+    if ph_m:
+        buyer_phone = ph_m.group(1).strip()
 
-        ph_m = re.search(r"(?:Contact|Phone|Mob)?\s*[:\s]*([6-9]\d{9})", b_block, re.IGNORECASE)
-        if ph_m:
-            buyer_phone = ph_m.group(1).strip()
+    # GSTIN
+    b_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", billing_text, re.IGNORECASE)
+    if b_gst_m:
+        buyer_gstin = b_gst_m.group(1).strip()
 
-        b_gst_m = re.search(r"GSTIN\s*[:\s]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", b_block, re.IGNORECASE)
-        if b_gst_m:
-            buyer_gstin = b_gst_m.group(1).strip()
+    # Pin Code
+    b_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", billing_text)
+    if b_pin_m:
+        buyer_pin = int(b_pin_m[0])
 
-        b_pin_m = re.findall(r"\b[1-9][0-9]{5}\b", b_block)
-        if b_pin_m:
-            buyer_pin = int(b_pin_m[0])
-
-        for l in b_lines[1:]:
-            clean_l = re.sub(r"[0-9\-,]", " ", l).strip()
-            words = [w for w in clean_l.split() if len(w) > 3 and not re.search(r"(road|station|near|opp|street|nagar|floor|block|india|contact|gstin|pan|email)", w, re.I)]
-            if words:
-                buyer_loc = words[0].title()
-                break
+    # Location / City from Billing Box
+    for l in b_lines[1:]:
+        clean_l = re.sub(r"[0-9\-,]", " ", l).strip()
+        words_in_l = [w for w in clean_l.split() if len(w) > 3 and not re.search(r"(road|station|near|opp|street|nagar|floor|block|india|contact|gstin|pan|email|house|marg)", w, re.I)]
+        if words_in_l:
+            buyer_loc = words_in_l[0].title()
+            break
 
     if not buyer_gstin:
         all_gstins = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}\b", full_text)
@@ -145,19 +166,19 @@ def extract_metadata(full_text):
         elif len(all_gstins) == 1:
             buyer_gstin = all_gstins[0]
         else:
-            buyer_gstin = "09AAFCG9846E1Z9"
+            buyer_gstin = "07AACCT5680N1ZS"
 
     buyer_state_code = buyer_gstin[:2]
-    buyer_state_name = STATE_CODE_MAP.get(buyer_state_code, "UTTAR PRADESH")
+    buyer_state_name = STATE_CODE_MAP.get(buyer_state_code, "DELHI")
     if not buyer_loc:
         buyer_loc = buyer_state_name.title()
     if not buyer_pin:
-        buyer_pin = int(buyer_state_code + "0001") if buyer_state_code.isdigit() else 226401
+        buyer_pin = int(buyer_state_code + "0001") if buyer_state_code.isdigit() else 110001
 
+    # Place of Supply (POS) - must be 2-digit state code
     pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*[A-Za-z\s\-]*(\d{2})", full_text, re.IGNORECASE)
     buyer_pos = pos_match.group(1).strip() if pos_match else buyer_state_code
 
-    # Check if Buyer is Blinkit
     is_blinkit = bool(re.search(r"blink\s*commerce|blinkit", f"{buyer_name} {full_text}", re.IGNORECASE))
 
     return {
@@ -192,11 +213,7 @@ def overwrite_area(page, rect, new_text, font_size=7):
 
 def process_and_reconcile_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    full_text = ""
-    for p in doc:
-        full_text += p.get_text() + "\n"
-
-    meta = extract_metadata(full_text)
+    meta = extract_metadata_from_doc(doc)
     is_blinkit = meta["is_blinkit"]
     line_items = []
 
@@ -229,7 +246,6 @@ def process_and_reconcile_pdf(pdf_bytes):
         if not hsn_box:
             hsn_box = (250, 330)
 
-        # Detect serial numbers (1, 2, 3...)
         sno_candidates = []
         for w in words:
             val = w[4].strip()
@@ -259,7 +275,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 if not prod_desc:
                     prod_desc = f"Item {item_anchor['sno']}"
 
-                # Factor rule ONLY applies if Buyer is Blinkit
                 factor = 1
                 if is_blinkit:
                     upper_desc = prod_desc.upper()
@@ -268,7 +283,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # Extract HSN Code
                 hsn_code = "63079091"
                 for w in row_words:
                     clean_w = w[4].replace(",", "").strip()
@@ -280,7 +294,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 final_q = None
                 final_p = None
 
-                # Process Quantity
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -293,7 +306,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                             else:
                                 final_q = orig_q
 
-                # Process Unit Price
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
                     rect = fitz.Rect(w[0], w[1], w[2], w[3])
@@ -319,7 +331,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "gst_rate": 5.0
                     })
         else:
-            # Fallback if S.No column wasn't detected
             product_rows = []
             for w in words:
                 text = w[4].upper()
@@ -367,7 +378,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "gst_rate": 5.0
                     })
 
-        # Only convert UOM to BOX if buyer is Blinkit
         if is_blinkit:
             for target in ["UOM-PC", "UOM-IBOX", "UOM-PCS", "UOM-BOX"]:
                 for inst in page.search_for(target):
@@ -632,7 +642,7 @@ def generate_official_nic_v101_excel(data_list):
                 "B2B", "N", "", "N",
                 # Document Details
                 "Tax Invoice", inv["invoice_no"], inv["doc_date"],
-                # Buyer Details
+                # Buyer Details (Exact Alignment)
                 inv["buyer_gstin"], inv["buyer_name"], inv["buyer_trade_name"], buyer_pos,
                 inv["buyer_addr1"], "", inv["buyer_loc"], inv["buyer_pin"],
                 inv["buyer_state_name"], inv["buyer_phone"], inv["buyer_email"],
@@ -722,9 +732,9 @@ if uploaded_invoices:
 
             st.markdown(f"""
                 <div style="background-color: #1e293b; padding: 14px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid {'#10b981' if is_blinkit else '#3b82f6'};">
-                    <b>Buyer:</b> {meta['buyer_name']} ({meta['buyer_gstin']}) &nbsp;|&nbsp; <b>Rule:</b> <code>{channel_badge}</code><br>
+                    <b>Buyer Name:</b> <code>{meta['buyer_name']}</code> &nbsp;|&nbsp; <b>Rule:</b> <code>{channel_badge}</code><br>
                     <b>Seller:</b> {meta['seller_name']} ({meta['seller_gstin']})<br>
-                    <b>Address:</b> {meta['buyer_addr1']}, {meta['buyer_loc']} - {meta['buyer_pin']} ({meta['buyer_state_name']})
+                    <b>Billing Address:</b> {meta['buyer_addr1']}, {meta['buyer_loc']} - {meta['buyer_pin']} ({meta['buyer_state_name']}) | <b>GSTIN:</b> {meta['buyer_gstin']}
                 </div>
             """, unsafe_allow_html=True)
 
