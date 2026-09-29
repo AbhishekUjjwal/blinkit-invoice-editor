@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">100% Correct Description | Col AR Blank | Exact Discount (Col BO) | Strict Round Off</p>
+        <p style="color: #94a3b8; font-size: 14px;">Strict Table Header Detection | Real Item Rows Only | Accurate Description & Col AR Blank</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -70,7 +70,6 @@ def clean_description_completely(desc, hsn_code=None):
     if hsn_code:
         desc = re.sub(rf"\b{re.escape(str(hsn_code))}\b", "", desc)
     desc = re.sub(r"\b\d{6,8}\b", "", desc)
-    # Fix wrapped lines like "T hree" -> "Three", "Co ck" -> "Cock"
     desc = re.sub(r'(\b[A-Za-z]+)\s+([a-z]{1,4}\b)', lambda m: m.group(1) + m.group(2) if (m.group(1)+m.group(2)).lower() in ["three", "cock", "valve", "dispo", "cannula", "piece", "stopcock"] else m.group(0), desc)
     desc = re.sub(r"\s+", " ", desc).strip()
     return desc
@@ -212,7 +211,6 @@ def extract_metadata_from_doc(doc):
 
     is_blinkit = bool(re.search(r"blink\s*commerce|blinkit", f"{buyer_name} {full_text}", re.IGNORECASE))
 
-    # Real Tax Type Detection
     has_cgst_header = bool(re.search(r"\bCGST\b", full_text, re.I))
     cgst_vals = re.findall(r"CGST[\s\S]*?(\d+\.\d{2})", full_text)
     has_positive_cgst = any(float(v) > 0 for v in cgst_vals[:4]) if cgst_vals else False
@@ -262,7 +260,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- ACCURATE TABLE & DESCRIPTION EXTRACTION -----------------
+# ----------------- STRICT TABLE HEADER & ITEM DETECTION -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -278,12 +276,34 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # Dynamic S.No anchors
+        # 1. Strictly find the REAL Table Header line Y coordinate
+        table_header_bottom_y = 200
+        y_groups = {}
+        for w in words:
+            y_key = round(w[1] / 7) * 7
+            y_groups.setdefault(y_key, []).append(w)
+
+        for y_key, g_words in sorted(y_groups.items()):
+            texts = [w[4].lower() for w in g_words]
+            full_line = " ".join(texts)
+            # A true table header must contain at least 2 of these table column headers
+            matches = sum(1 for k in ["hsn", "qty", "quantity", "unit price", "price", "rate", "taxable", "s.no", "item code"] if k in full_line)
+            if matches >= 2:
+                table_header_bottom_y = max(w[3] for w in g_words)
+                break
+
+        table_bottom_y = page.rect.height - 30
+        for w in words:
+            wt = w[4].lower().strip()
+            if w[1] > (table_header_bottom_y + 30) and any(k in wt for k in ["total", "subtotal", "gst summary", "summary", "words"]):
+                table_bottom_y = min(table_bottom_y, w[1])
+
+        # 2. S.No candidates MUST be strictly BELOW the table header
         sno_candidates = []
         for w in words:
             val = w[4].strip()
             if val.isdigit() and 1 <= int(val) <= 99:
-                if w[0] < 110 and w[1] > 180:
+                if w[0] < 85 and w[1] > (table_header_bottom_y + 2):
                     if not any(abs(c["center_y"] - ((w[1]+w[3])/2)) < 8 for c in sno_candidates):
                         sno_candidates.append({
                             "sno": int(val),
@@ -294,15 +314,9 @@ def process_and_reconcile_pdf(pdf_bytes):
 
         sno_candidates.sort(key=lambda x: x["center_y"])
 
-        table_bottom_y = page.rect.height - 30
-        for w in words:
-            wt = w[4].lower().strip()
-            if w[1] > 320 and any(k in wt for k in ["total", "subtotal", "gst summary", "summary", "words"]):
-                table_bottom_y = min(table_bottom_y, w[1])
-
         if sno_candidates:
             for idx, item_anchor in enumerate(sno_candidates):
-                y_top = item_anchor["y0"] - 4
+                y_top = item_anchor["y0"] - 3
                 if idx + 1 < len(sno_candidates):
                     y_bottom = sno_candidates[idx + 1]["y0"] - 2
                 else:
@@ -314,7 +328,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                 if not row_words:
                     continue
 
-                # 1. Detect HSN
+                # 1. HSN Detection (6 to 8 digits)
                 hsn_w = None
                 hsn_code = "90183990"
                 for w in row_words:
@@ -326,16 +340,18 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 hsn_x0 = hsn_w[0] if hsn_w else 220
 
-                # 2. Perfect Product Description (Multi-line lines sorted Y then X)
-                desc_words = [w for w in row_words if 35 <= w[0] < (hsn_x0 - 4) and not w[4].isdigit()]
+                # 2. Perfect Description (Strictly between S.No and HSN)
+                desc_words = [w for w in row_words if 30 <= w[0] < (hsn_x0 - 4) and not w[4].isdigit()]
                 desc_words.sort(key=lambda w: (round(w[1] / 6) * 6, w[0]))
                 raw_desc = " ".join([w[4] for w in desc_words]).strip()
                 pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code)
+
+                # Skip address pollution or non-product lines
+                if any(k in pure_desc.lower() for k in ["private limited", "tehsil", "district", "kumaspur", "cod charge", "shipping charge", "item code"]):
+                    continue
+
                 if not pure_desc:
                     pure_desc = f"Item {item_anchor['sno']}"
-
-                if any(k in pure_desc.lower() for k in ["cod charge", "shipping charge"]):
-                    continue
 
                 factor = 1
                 if is_blinkit:
@@ -345,14 +361,17 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # 3. Numbers to the right of HSN
-                search_words = [w for w in row_words if w[0] > (hsn_w[2] if hsn_w else (hsn_x0 + 10))]
+                # 3. Numeric values strictly after HSN column
+                search_words = [w for w in row_words if w[0] > (hsn_w[2] if hsn_w else (hsn_x0 + 5))]
                 search_words.sort(key=lambda w: w[0])
 
                 after_hsn_nums = []
                 for w in search_words:
                     val = w[4].replace(",", "").strip()
                     if re.match(r"^\d+(\.\d{1,2})?$", val):
+                        # Skip phone numbers (e.g. 10 digits)
+                        if len(val) >= 9:
+                            continue
                         after_hsn_nums.append({
                             "val": float(val),
                             "str": val,
@@ -542,7 +561,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% ACCURATE EXCEL GENERATOR (RAW BYTES) -----------------
+# ----------------- 100% POPULATED EXCEL GENERATOR (RAW BYTES) -----------------
 
 def generate_official_nic_v101_excel_bytes(data_list):
     wb = openpyxl.Workbook()
