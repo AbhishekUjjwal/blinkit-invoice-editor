@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Discount in Col BO Fixed | Pre Tax Value Blank (Col AR) | Strict Decimal Round Off</p>
+        <p style="color: #94a3b8; font-size: 14px;">Universal Parser | Guaranteed Row 5+ Population | Exact Discount & Strict Round Off</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -240,7 +240,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PARSING WITH EXACT COLUMN ALIGNED EXTRACTION -----------------
+# ----------------- FAIL-SAFE UNIVERSAL TABLE PARSER -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -256,38 +256,26 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # Column Header Positions
-        h_qty_x = 220
-        h_price_x = 265
-        h_disc_x = 320
-        h_tax_x = 380
+        # 1. Detect Table Top Boundary
         table_top_y = 150
-
         for w in words:
             wt = w[4].lower().strip()
-            if wt in ["s.no", "sl.no", "item"]:
+            if wt in ["s.no", "sl.no", "s.no.", "sl", "item", "hsn", "qty"]:
                 table_top_y = max(table_top_y, w[1])
-            elif wt in ["qty", "quantity"]:
-                h_qty_x = (w[0] + w[2]) / 2
-            elif wt in ["unit price", "price", "rate"]:
-                h_price_x = (w[0] + w[2]) / 2
-            elif "disc" in wt:
-                h_disc_x = (w[0] + w[2]) / 2
-            elif "taxable" in wt:
-                h_tax_x = (w[0] + w[2]) / 2
 
+        # 2. Detect Table Bottom Boundary
         table_bottom_y = page.rect.height - 30
         for w in words:
             wt = w[4].lower().strip()
             if w[1] > (table_top_y + 30) and any(k in wt for k in ["total", "subtotal", "gst summary", "summary", "words"]):
                 table_bottom_y = min(table_bottom_y, w[1])
 
-        # S.No Detection
+        # 3. Detect S.No Rows
         sno_candidates = []
         for w in words:
             val = w[4].strip()
             if val.isdigit() and 1 <= int(val) <= 99:
-                if w[0] < 110 and (table_top_y - 15) < w[1] < table_bottom_y:
+                if w[0] < 120 and (table_top_y - 15) < w[1] < table_bottom_y:
                     if not any(abs(c["center_y"] - ((w[1]+w[3])/2)) < 8 for c in sno_candidates):
                         sno_candidates.append({
                             "sno": int(val),
@@ -308,27 +296,27 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
-                # HSN Code
+                # Find HSN
                 hsn_candidates = [
                     w[4].replace(",", "").strip() for w in row_words
                     if w[4].replace(",", "").strip().isdigit() and len(w[4].replace(",", "").strip()) in [6, 7, 8]
                 ]
                 hsn_code = hsn_candidates[0] if hsn_candidates else "90183990"
 
-                # HSN X-boundary
+                # Find Description
                 hsn_x = 220
                 for w in row_words:
                     if w[4].replace(",", "").strip() == hsn_code:
                         hsn_x = w[0]
                         break
 
-                # Description
                 desc_words = [w[4] for w in row_words if 60 <= w[0] < (hsn_x - 4) and not w[4].isdigit()]
                 raw_desc = " ".join(desc_words).strip()
                 pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code)
                 if not pure_desc:
                     pure_desc = f"Item {item_anchor['sno']}"
 
+                # Skip non-product lines
                 if any(k in pure_desc.lower() for k in ["cod charge", "shipping charge"]):
                     continue
 
@@ -340,50 +328,46 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # Extract Qty, Price, Discount, Taxable by horizontal proximity to headers
-                row_nums = []
+                # Find numbers on this row: [Qty, Price, Discount, Taxable...]
+                numeric_words = []
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
-                    if w[0] > (hsn_x - 10) and re.match(r"^\d+(\.\d{1,2})?$", val):
-                        row_nums.append({
-                            "val": float(val),
-                            "x": (w[0] + w[2]) / 2,
-                            "rect": fitz.Rect(w[0], w[1], w[2], w[3])
-                        })
+                    if w[0] > (hsn_x - 10):
+                        if re.match(r"^\d+(\.\d{1,2})?$", val):
+                            numeric_words.append({
+                                "val": float(val),
+                                "str": val,
+                                "x": w[0],
+                                "rect": fitz.Rect(w[0], w[1], w[2], w[3])
+                            })
+
+                numeric_words.sort(key=lambda n: n["x"])
 
                 final_q = None
                 final_p = None
                 final_disc = 0.0
                 final_taxable = None
 
-                if row_nums:
-                    # Pick closest number to each header
-                    q_cand = min(row_nums, key=lambda n: abs(n["x"] - h_qty_x))
-                    final_q = int(q_cand["val"])
+                if numeric_words:
+                    final_q = int(numeric_words[0]["val"])
                     if factor > 1 and final_q >= factor:
                         final_q = final_q // factor
-                        overwrite_area(page, q_cand["rect"], f"{final_q}")
+                        overwrite_area(page, numeric_words[0]["rect"], f"{final_q}")
 
-                    p_cand = min(row_nums, key=lambda n: abs(n["x"] - h_price_x))
-                    final_p = p_cand["val"]
-                    if factor > 1:
-                        final_p = round(final_p * factor, 2)
-                        overwrite_area(page, p_cand["rect"], f"{final_p:.2f}")
+                    if len(numeric_words) > 1:
+                        final_p = numeric_words[1]["val"]
+                        if factor > 1:
+                            final_p = round(final_p * factor, 2)
+                            overwrite_area(page, numeric_words[1]["rect"], f"{final_p:.2f}")
 
-                    # Discount candidate
-                    disc_cand = min(row_nums, key=lambda n: abs(n["x"] - h_disc_x))
-                    if abs(disc_cand["x"] - h_disc_x) < 40:
-                        final_disc = disc_cand["val"]
+                    if len(numeric_words) > 2:
+                        final_disc = numeric_words[2]["val"]
 
-                    # Taxable candidate
-                    tax_cand = min(row_nums, key=lambda n: abs(n["x"] - h_tax_x))
-                    if abs(tax_cand["x"] - h_tax_x) < 40 and tax_cand["val"] > 0:
-                        final_taxable = tax_cand["val"]
+                    if len(numeric_words) > 3:
+                        final_taxable = numeric_words[3]["val"]
 
                 if final_q is not None and final_p is not None and final_q > 0:
                     gross_amt = round(final_q * final_p, 2)
-
-                    # Fail-Safe Discount & Taxable Reconciliation
                     if final_taxable is not None and final_taxable > 0:
                         taxable_val = final_taxable
                         if gross_amt > taxable_val and final_disc == 0.0:
@@ -405,7 +389,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "gst_rate": 5.0
                     })
 
-        # Regex Fallback if coordinates missed
+        # FALLBACK 1: If coordinates missed, extract via regex lines from full_text
         if not line_items:
             full_txt = page.get_text()
             item_matches = re.findall(r"(\d+)\s+([A-Za-z0-9\-\s]+?)\s+(\d{6,8})\s+(\d+)\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})", full_txt)
@@ -430,7 +414,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                     "gst_rate": 5.0
                 })
 
-        # Safe Fallback to guarantee Row 5+ is never empty
+        # ULTIMATE CRASH-PROOF FALLBACK: Ensure Row 5 is NEVER blank
         if not line_items:
             raw_pt = meta.get("printed_grand_total")
             p_total = float(raw_pt) if raw_pt is not None else 1000.0
@@ -521,7 +505,7 @@ def build_einvoice_json_v101(data):
             "TotItemVal": tot_item_val
         })
 
-    # Strict Decimal Rounding: Always between -0.99 and +0.99
+    # Strict GST Rounding: Max ±0.99
     exact_calc_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
     final_rounded_total = round(exact_calc_total)
     round_off_amt = round(final_rounded_total - exact_calc_total, 2)
@@ -723,7 +707,6 @@ def generate_official_nic_v101_excel_bytes(data_list):
             tot_cgst = round(tot_taxable * 0.025, 2)
             tot_sgst = round(tot_taxable * 0.025, 2)
 
-        # Precise GST Round Off Formula: Always between -0.99 and +0.99
         exact_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
         final_inv_val = round(exact_total)
         exact_round_off = round(final_inv_val - exact_total, 2)
@@ -780,7 +763,7 @@ def generate_official_nic_v101_excel_bytes(data_list):
                 fmt_dec(price),                               # AO (41): Unit Price *
                 fmt_dec(gross_amt),                           # AP (42): Gross Amount
                 fmt_dec(disc),                                # AQ (43): Discount (Item Level)
-                "",                                           # AR (44): Pre Tax Value (BLANK AS REQUESTED)
+                fmt_dec(gross_amt - disc),                    # AR (44): Pre Tax Value
                 fmt_dec(taxable),                             # AS (45): Taxable value *
                 str(int(gst_rate)),                           # AT (46): GST Rate (%) *
                 fmt_dec(sgst),                                # AU (47): Sgst Amt(Rs)
@@ -797,7 +780,7 @@ def generate_official_nic_v101_excel_bytes(data_list):
                 fmt_dec(tot_igst),                            # BL (64): Igst Amt
                 "0.00",                                       # BM (65): Cess Amt
                 "0.00",                                       # BN (66): State Cess Amt
-                fmt_dec(tot_discount),                        # BO (67): Discount (Invoice Total)
+                fmt_dec(tot_discount),                        # BO (67): Discount (Invoice Level Total)
                 "0.00",                                       # BP (68): Other charges
                 fmt_dec(exact_round_off),                     # BQ (69): Round off (Strict Max ±0.99)
                 fmt_dec(final_inv_val),                       # BR (70): Total Invoice value *
@@ -814,7 +797,7 @@ def generate_official_nic_v101_excel_bytes(data_list):
                 cell.number_format = '@'
                 if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 25, 31, 32, 33, 35, 36, 38, 40, 46]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
-                elif c_idx in [41, 42, 43, 45, 47, 48, 49, 57, 61, 62, 63, 64, 67, 69, 70]:
+                elif c_idx in [41, 42, 43, 44, 45, 47, 48, 49, 57, 61, 62, 63, 64, 67, 69, 70]:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
