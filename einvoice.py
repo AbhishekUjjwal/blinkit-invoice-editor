@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Discount in Col BO Fixed | Pre Tax Value Blank (Col AR) | Strict Decimal Round Off</p>
+        <p style="color: #94a3b8; font-size: 14px;">100% Reconciled Tax (IGST / CGST / SGST) | Col AR Blank | Exact Discount & Round Off</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -33,6 +33,8 @@ STATE_CODE_MAP = {
     "34": "PUDUCHERRY", "35": "ANDAMAN AND NICOBAR ISLANDS", "36": "TELANGANA", "37": "ANDHRA PRADESH",
     "38": "LADAKH"
 }
+
+STATE_NAME_TO_CODE = {v.upper(): k for k, v in STATE_CODE_MAP.items()}
 
 MAJOR_CITIES = [
     "New Delhi", "Delhi", "Varanasi", "Lucknow", "Jaipur", "Gurgaon", "Gurugram", 
@@ -195,11 +197,42 @@ def extract_metadata_from_doc(doc):
     clean_s_str = re.sub(r'[^A-Za-z0-9]', '', f"{ship_addr1}{ship_pin}").lower()
     shipping_is_different = (clean_b_str != clean_s_str) and (buyer_pin != ship_pin or buyer_addr1 != ship_addr1)
 
-    pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*[A-Za-z\s\-]*(\d{2})", full_text, re.IGNORECASE)
-    buyer_pos = pos_match.group(1).strip() if pos_match else buyer_state_code
-    pos_state_name = STATE_CODE_MAP.get(buyer_pos, buyer_state_name)
+    # POS Detection (Numeric or Text)
+    pos_match = re.search(r"Place\s*of\s*Supply\s*[:\s]*([A-Za-z\s\-]+?)(?=\n|GST|State|$)", full_text, re.IGNORECASE)
+    pos_raw = pos_match.group(1).strip() if pos_match else ""
+    pos_digits = re.findall(r"\b\d{2}\b", pos_raw)
+
+    if pos_digits:
+        buyer_pos_code = pos_digits[0]
+        pos_state_name = STATE_CODE_MAP.get(buyer_pos_code, buyer_state_name)
+    else:
+        # Match State Name to code
+        matched_code = None
+        for s_name, s_code in STATE_NAME_TO_CODE.items():
+            if s_name in pos_raw.upper():
+                matched_code = s_code
+                pos_state_name = s_name.title()
+                break
+        buyer_pos_code = matched_code if matched_code else buyer_state_code
+        pos_state_name = STATE_CODE_MAP.get(buyer_pos_code, buyer_state_name)
 
     is_blinkit = bool(re.search(r"blink\s*commerce|blinkit", f"{buyer_name} {full_text}", re.IGNORECASE))
+
+    # Detect if PDF has explicit CGST/SGST or IGST columns/values
+    has_explicit_cgst = bool(re.search(r"\bCGST\b", full_text, re.I))
+    has_explicit_igst = bool(re.search(r"\bIGST\b", full_text, re.I))
+
+    # Check GST summary in PDF
+    igst_val_m = re.findall(r"IGST[\s\S]*?(\d+\.\d{2})", full_text)
+    cgst_val_m = re.findall(r"CGST[\s\S]*?(\d+\.\d{2})", full_text)
+
+    is_interstate = False
+    if has_explicit_cgst and cgst_val_m and any(float(v) > 0 for v in cgst_val_m[:4]):
+        is_interstate = False
+    elif has_explicit_igst and igst_val_m and any(float(v) > 0 for v in igst_val_m[:4]):
+        is_interstate = True
+    else:
+        is_interstate = (seller_state_code != buyer_pos_code)
 
     inv_total_m = re.search(r"(?:Total\s*Invoice\s*Value|Invoice\s*Total|Grand\s*Total|Total\s*Amount)[:\s]*[₹\s]*([0-9,]+\.\d{2})", full_text, re.I)
     printed_grand_total = float(inv_total_m.group(1).replace(",", "")) if inv_total_m else None
@@ -226,8 +259,9 @@ def extract_metadata_from_doc(doc):
         "buyer_gstin": buyer_gstin,
         "buyer_state_code": buyer_state_code,
         "buyer_state_name": buyer_state_name,
-        "buyer_pos": buyer_pos,
+        "buyer_pos": buyer_pos_code,
         "pos_state_name": pos_state_name,
+        "is_interstate": is_interstate,
         "shipping_is_different": shipping_is_different,
         "ship_name": ship_name,
         "ship_addr1": ship_addr1,
@@ -240,7 +274,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PARSING WITH EXACT COLUMN ALIGNED EXTRACTION -----------------
+# ----------------- PARSING WITH ACCURATE COLUMN POSITIONS -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -251,12 +285,12 @@ def process_and_reconcile_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     meta = extract_metadata_from_doc(doc)
     is_blinkit = meta["is_blinkit"]
+    is_interstate = meta["is_interstate"]
     line_items = []
 
     for page in doc:
         words = page.get_text("words")
 
-        # Column Header Positions
         h_qty_x = 220
         h_price_x = 265
         h_disc_x = 320
@@ -308,21 +342,18 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
-                # HSN Code
                 hsn_candidates = [
                     w[4].replace(",", "").strip() for w in row_words
                     if w[4].replace(",", "").strip().isdigit() and len(w[4].replace(",", "").strip()) in [6, 7, 8]
                 ]
                 hsn_code = hsn_candidates[0] if hsn_candidates else "90183990"
 
-                # HSN X-boundary
                 hsn_x = 220
                 for w in row_words:
                     if w[4].replace(",", "").strip() == hsn_code:
                         hsn_x = w[0]
                         break
 
-                # Description
                 desc_words = [w[4] for w in row_words if 60 <= w[0] < (hsn_x - 4) and not w[4].isdigit()]
                 raw_desc = " ".join(desc_words).strip()
                 pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code)
@@ -340,7 +371,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                     elif "COMFIT" in upper_desc:
                         factor = 25
 
-                # Extract Qty, Price, Discount, Taxable by horizontal proximity to headers
                 row_nums = []
                 for w in row_words:
                     val = w[4].replace(",", "").strip()
@@ -357,7 +387,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 final_taxable = None
 
                 if row_nums:
-                    # Pick closest number to each header
                     q_cand = min(row_nums, key=lambda n: abs(n["x"] - h_qty_x))
                     final_q = int(q_cand["val"])
                     if factor > 1 and final_q >= factor:
@@ -370,12 +399,10 @@ def process_and_reconcile_pdf(pdf_bytes):
                         final_p = round(final_p * factor, 2)
                         overwrite_area(page, p_cand["rect"], f"{final_p:.2f}")
 
-                    # Discount candidate
                     disc_cand = min(row_nums, key=lambda n: abs(n["x"] - h_disc_x))
                     if abs(disc_cand["x"] - h_disc_x) < 40:
                         final_disc = disc_cand["val"]
 
-                    # Taxable candidate
                     tax_cand = min(row_nums, key=lambda n: abs(n["x"] - h_tax_x))
                     if abs(tax_cand["x"] - h_tax_x) < 40 and tax_cand["val"] > 0:
                         final_taxable = tax_cand["val"]
@@ -383,7 +410,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 if final_q is not None and final_p is not None and final_q > 0:
                     gross_amt = round(final_q * final_p, 2)
 
-                    # Fail-Safe Discount & Taxable Reconciliation
                     if final_taxable is not None and final_taxable > 0:
                         taxable_val = final_taxable
                         if gross_amt > taxable_val and final_disc == 0.0:
@@ -405,7 +431,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "gst_rate": 5.0
                     })
 
-        # Regex Fallback if coordinates missed
+        # Regex Fallback
         if not line_items:
             full_txt = page.get_text()
             item_matches = re.findall(r"(\d+)\s+([A-Za-z0-9\-\s]+?)\s+(\d{6,8})\s+(\d+)\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})", full_txt)
@@ -430,7 +456,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                     "gst_rate": 5.0
                 })
 
-        # Safe Fallback to guarantee Row 5+ is never empty
+        # Ultimate Safe Fallback
         if not line_items:
             raw_pt = meta.get("printed_grand_total")
             p_total = float(raw_pt) if raw_pt is not None else 1000.0
@@ -468,6 +494,7 @@ def process_and_reconcile_pdf(pdf_bytes):
 # ----------------- JSON v1.01 BUILDER -----------------
 
 def build_einvoice_json_v101(data):
+    is_interstate = data["is_interstate"]
     seller_state_code = data["seller_state_code"]
     buyer_pos = data["buyer_pos"]
 
@@ -485,7 +512,6 @@ def build_einvoice_json_v101(data):
         tot_taxable += taxable_amt
 
         gst_rate = item.get("gst_rate", 5.0)
-        is_interstate = (seller_state_code != buyer_pos)
 
         if is_interstate:
             igst_amt = round((taxable_amt * gst_rate) / 100, 2)
@@ -586,7 +612,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% POPULATED EXCEL GENERATOR (RAW BYTES) -----------------
+# ----------------- 100% ACCURATE EXCEL GENERATOR (RAW BYTES) -----------------
 
 def generate_official_nic_v101_excel_bytes(data_list):
     wb = openpyxl.Workbook()
@@ -706,24 +732,48 @@ def generate_official_nic_v101_excel_bytes(data_list):
 
     curr_row = 5
     for inv in data_list:
-        seller_state_code = inv["seller_state_code"]
-        buyer_pos = inv["buyer_pos"]
+        is_interstate = inv["is_interstate"]
         pos_str = inv["pos_state_name"].title()
 
-        tot_taxable = sum([it["taxable_val"] for it in inv["line_items"]])
-        tot_discount = sum([it.get("discount", 0.0) for it in inv["line_items"]])
-        is_interstate = (seller_state_code != buyer_pos)
+        # Calculate exact item taxes first
+        item_rows_data = []
+        tot_taxable = 0.0
+        tot_cgst = 0.0
+        tot_sgst = 0.0
+        tot_igst = 0.0
+        tot_discount = 0.0
 
-        if is_interstate:
-            tot_igst = round(tot_taxable * 0.05, 2)
-            tot_cgst = 0.0
-            tot_sgst = 0.0
-        else:
-            tot_igst = 0.0
-            tot_cgst = round(tot_taxable * 0.025, 2)
-            tot_sgst = round(tot_taxable * 0.025, 2)
+        for it in inv["line_items"]:
+            qty = it["qty"]
+            price = it["unit_price"]
+            gross_amt = it.get("gross_amt", round(qty * price, 2))
+            disc = it.get("discount", 0.0)
+            taxable = it.get("taxable_val", gross_amt)
+            gst_rate = it.get("gst_rate", 5.0)
 
-        # Precise GST Round Off Formula: Always between -0.99 and +0.99
+            tot_taxable += taxable
+            tot_discount += disc
+
+            if is_interstate:
+                igst = round(taxable * (gst_rate / 100), 2)
+                cgst = 0.0
+                sgst = 0.0
+                tot_igst += igst
+            else:
+                cgst = round(taxable * (gst_rate / 200), 2)
+                sgst = round(taxable * (gst_rate / 200), 2)
+                igst = 0.0
+                tot_cgst += cgst
+                tot_sgst += sgst
+
+            item_tot = round(taxable + cgst + sgst + igst, 2)
+            item_rows_data.append({
+                "it": it, "qty": qty, "price": price, "gross_amt": gross_amt,
+                "disc": disc, "taxable": taxable, "gst_rate": gst_rate,
+                "cgst": cgst, "sgst": sgst, "igst": igst, "item_tot": item_tot
+            })
+
+        # Exact Decimal Round Off: Always between -0.99 and +0.99
         exact_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
         final_inv_val = round(exact_total)
         exact_round_off = round(final_inv_val - exact_total, 2)
@@ -736,24 +786,8 @@ def generate_official_nic_v101_excel_bytes(data_list):
         else:
             ship_vals = ["", "", "", "", "", "", "", ""]
 
-        for s_no, it in enumerate(inv["line_items"], 1):
-            qty = it["qty"]
-            price = it["unit_price"]
-            gross_amt = it.get("gross_amt", round(qty * price, 2))
-            disc = it.get("discount", 0.0)
-            taxable = it.get("taxable_val", gross_amt)
-            gst_rate = it.get("gst_rate", 5.0)
-
-            if is_interstate:
-                igst = round(taxable * (gst_rate / 100), 2)
-                cgst = 0.0
-                sgst = 0.0
-            else:
-                cgst = round(taxable * (gst_rate / 200), 2)
-                sgst = round(taxable * (gst_rate / 200), 2)
-                igst = 0.0
-
-            item_tot = round(taxable + cgst + sgst + igst, 2)
+        for s_no, r_data in enumerate(item_rows_data, 1):
+            it = r_data["it"]
 
             row_data = [
                 # Supply Details (1 to 4: A-D)
@@ -774,20 +808,20 @@ def generate_official_nic_v101_excel_bytes(data_list):
                 "N",                                          # AI (35): Is Service *
                 str(it["hsn"]),                               # AJ (36): HSN Code *
                 "",                                           # AK (37): Bar Code
-                str(qty),                                     # AL (38): Quantity *
+                str(r_data["qty"]),                           # AL (38): Quantity *
                 "0",                                          # AM (39): Free Quantity
                 str(it.get("unit", "PAC")),                   # AN (40): Unit *
-                fmt_dec(price),                               # AO (41): Unit Price *
-                fmt_dec(gross_amt),                           # AP (42): Gross Amount
-                fmt_dec(disc),                                # AQ (43): Discount (Item Level)
-                "",                                           # AR (44): Pre Tax Value (BLANK AS REQUESTED)
-                fmt_dec(taxable),                             # AS (45): Taxable value *
-                str(int(gst_rate)),                           # AT (46): GST Rate (%) *
-                fmt_dec(sgst),                                # AU (47): Sgst Amt(Rs)
-                fmt_dec(cgst),                                # AV (48): Cgst Amt(Rs)
-                fmt_dec(igst),                                # AW (49): Igst Amt(Rs)
+                fmt_dec(r_data["price"]),                     # AO (41): Unit Price *
+                fmt_dec(r_data["gross_amt"]),                 # AP (42): Gross Amount
+                fmt_dec(r_data["disc"]),                      # AQ (43): Discount (Item Level)
+                "",                                           # AR (44): Pre Tax Value (BLANK)
+                fmt_dec(r_data["taxable"]),                   # AS (45): Taxable value *
+                str(int(r_data["gst_rate"])),                 # AT (46): GST Rate (%) *
+                fmt_dec(r_data["sgst"]),                      # AU (47): Sgst Amt(Rs)
+                fmt_dec(r_data["cgst"]),                      # AV (48): Cgst Amt(Rs)
+                fmt_dec(r_data["igst"]),                      # AW (49): Igst Amt(Rs)
                 "0", "0.00", "0.00", "0", "0.00", "0.00", "0.00", # AX to BD (50 to 56): Cess & Other
-                fmt_dec(item_tot),                            # BE (57): Item Total *
+                fmt_dec(r_data["item_tot"]),                  # BE (57): Item Total *
                 # Spacer Cols (58 to 60: BF, BG, BH)
                 "", "", "",
                 # Value Details (61 to 70: BI-BR)
@@ -849,7 +883,6 @@ def generate_official_nic_v101_excel_bytes(data_list):
         d_ws["A1"] = f"{t} - Official e-Invoice System Utility"
         d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
 
-    # Set eInvoice as primary active sheet
     wb.active = ws
 
     out_io = io.BytesIO()
@@ -859,9 +892,7 @@ def generate_official_nic_v101_excel_bytes(data_list):
 # ----------------- CLEAN EXACT GOVERNMENT E-INVOICE PREVIEW -----------------
 
 def render_exact_government_einvoice_preview(meta):
-    seller_st = meta['seller_state_code']
-    buyer_pos = meta['buyer_pos']
-    is_interstate = (seller_st != buyer_pos)
+    is_interstate = meta["is_interstate"]
 
     tot_taxable = sum([it['taxable_val'] for it in meta['line_items']])
     tot_discount = sum([it.get('discount', 0.0) for it in meta['line_items']])
