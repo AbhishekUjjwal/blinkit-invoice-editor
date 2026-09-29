@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">100% Exact Column-Aligned to User's Strip | Pre Tax (AR) & Taxable (AS) Fixed</p>
+        <p style="color: #94a3b8; font-size: 14px;">Exact Discount Captured (Col AQ & BO) | Strict GST Round Off (Max ±0.99) | Official Template</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -77,7 +77,7 @@ def clean_description_completely(desc, hsn_code=None):
     desc = re.sub(r"\s+", " ", desc).strip()
     return desc
 
-# ----------------- COORDINATE EXTRACTION -----------------
+# ----------------- COORDINATE & METADATA EXTRACTION -----------------
 
 def extract_metadata_from_doc(doc):
     full_text = ""
@@ -240,7 +240,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PARSING WITH BLINKIT 50x / 25x FORMULA -----------------
+# ----------------- PARSING WITH EXACT DISCOUNT AND TAXABLE DETECTION -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -273,7 +273,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                 hsn_max_x = w[2] + 35
             elif wt == "qty":
                 qty_left = w[0] - 8
-            elif "price" in wt or "unit" in wt:
+            elif "price" in wt or "unit" in wt or "rate" in wt:
                 price_left = w[0] - 8
             elif "disc" in wt:
                 disc_left = w[0] - 8
@@ -310,6 +310,7 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
+                # 1. HSN Code
                 hsn_box_rect = fitz.Rect(hsn_min_x, y_top, hsn_max_x, y_bottom)
                 hsn_clip_text = page.get_text("text", clip=hsn_box_rect)
                 hsn_matches = re.findall(r"\b(\d{6,8})\b", hsn_clip_text)
@@ -352,8 +353,9 @@ def process_and_reconcile_pdf(pdf_bytes):
                 final_q = None
                 final_p = None
                 printed_taxable = None
-                printed_discount = 0.0
+                raw_extracted_disc = 0.0
 
+                # 2. Quantity
                 qty_box_rect = fitz.Rect(qty_left - 2, y_top, price_left - 2, y_bottom)
                 for w in words:
                     if qty_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
@@ -368,12 +370,13 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 final_q = orig_q
                             break
 
+                # 3. Unit Price
                 price_box_rect = fitz.Rect(price_left - 2, y_top, disc_left - 2, y_bottom)
                 for w in words:
                     if price_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
                         val = w[4].replace(",", "").strip()
                         rect = fitz.Rect(w[0], w[1], w[2], w[3])
-                        if re.match(r"^\d+\.\d{2}$", val):
+                        if re.match(r"^\d+(\.\d{1,2})?$", val):
                             orig_p = float(val)
                             if orig_p > 0.00:
                                 if factor > 1:
@@ -383,24 +386,33 @@ def process_and_reconcile_pdf(pdf_bytes):
                                     final_p = orig_p
                                 break
 
-                disc_box_rect = fitz.Rect(disc_left - 2, y_top, tax_left - 2, y_bottom)
-                raw_disc_text = page.get_text("text", clip=disc_box_rect)
-                disc_m = re.findall(r"\b\d+\.\d{2}\b", raw_disc_text)
-                if disc_m:
-                    printed_discount = float(disc_m[0])
-
-                tax_box_rect = fitz.Rect(tax_left - 2, y_top, tax_left + 85, y_bottom)
+                # 4. Taxable Value (Printed directly on Invoice)
+                tax_box_rect = fitz.Rect(tax_left - 4, y_top, tax_left + 90, y_bottom)
                 raw_tax_text = page.get_text("text", clip=tax_box_rect)
-                tax_m = re.findall(r"\b\d+\.\d{2}\b", raw_tax_text)
+                tax_m = re.findall(r"\b\d+[.,]\d{2}\b", raw_tax_text)
                 if tax_m:
-                    printed_taxable = float(tax_m[0])
+                    printed_taxable = float(tax_m[0].replace(",", ""))
+
+                # 5. Discount (Extracted from column or mathematically resolved)
+                disc_box_rect = fitz.Rect(disc_left - 4, y_top, tax_left - 2, y_bottom)
+                raw_disc_text = page.get_text("text", clip=disc_box_rect)
+                disc_m = re.findall(r"\b\d+(?:\.\d{1,2})?\b", raw_disc_text)
+                if disc_m:
+                    raw_extracted_disc = float(disc_m[0])
 
                 if final_q is not None and final_p is not None:
                     gross_amt = round(final_q * final_p, 2)
+
+                    # Fail-Safe Discount & Taxable Reconciliation
                     if printed_taxable is not None and printed_taxable > 0:
                         taxable_val = printed_taxable
+                        if gross_amt > taxable_val:
+                            final_discount = round(gross_amt - taxable_val, 2)
+                        else:
+                            final_discount = raw_extracted_disc
                     else:
-                        taxable_val = round(gross_amt - printed_discount, 2)
+                        final_discount = raw_extracted_disc
+                        taxable_val = round(gross_amt - final_discount, 2)
 
                     unit_label = "BOX" if (is_blinkit and factor > 1) else "PAC"
                     line_items.append({
@@ -411,7 +423,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "unit": unit_label,
                         "unit_price": final_p,
                         "gross_amt": gross_amt,
-                        "discount": printed_discount,
+                        "discount": final_discount,
                         "taxable_val": taxable_val,
                         "gst_rate": 5.0
                     })
@@ -489,8 +501,9 @@ def build_einvoice_json_v101(data):
             "TotItemVal": tot_item_val
         })
 
-    calc_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
-    final_total = data.get("printed_grand_total") if data.get("printed_grand_total") else calc_total
+    exact_calc_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
+    final_rounded_total = round(exact_calc_total)
+    round_off_amt = round(final_rounded_total - exact_calc_total, 2)
 
     ship_dtls = None
     if data.get("shipping_is_different", False):
@@ -547,8 +560,8 @@ def build_einvoice_json_v101(data):
             "IgstVal": round(tot_igst, 2),
             "CesVal": 0.0,
             "StCesVal": 0.0,
-            "RndOffAmt": round(final_total - calc_total, 2),
-            "TotInvVal": round(final_total, 2)
+            "RndOffAmt": round_off_amt,
+            "TotInvVal": round(final_rounded_total, 2)
         }
     }
 
@@ -689,8 +702,10 @@ def generate_official_nic_v101_excel(data_list):
             tot_cgst = round(tot_taxable * 0.025, 2)
             tot_sgst = round(tot_taxable * 0.025, 2)
 
-        calc_inv_val = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
-        final_inv_val = inv.get("printed_grand_total") if inv.get("printed_grand_total") else calc_inv_val
+        # Precise GST Round Off Formula: Always between -0.99 and +0.99
+        exact_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
+        final_inv_val = round(exact_total)
+        exact_round_off = round(final_inv_val - exact_total, 2)
 
         if inv.get("shipping_is_different", False):
             ship_vals = [
@@ -719,7 +734,6 @@ def generate_official_nic_v101_excel(data_list):
 
             item_tot = round(taxable + cgst + sgst + igst, 2)
 
-            # EXACT 85 COLUMNS VALUES MATCHING USER'S STRIP
             row_data = [
                 # Supply Details (1 to 4: A-D)
                 "B2B", "N", "", "N",
@@ -734,38 +748,38 @@ def generate_official_nic_v101_excel(data_list):
                 # Shipping Details (25 to 32: Y-AF)
                 *ship_vals,
                 # Product Details (33 to 57: AG-BE)
-                str(s_no),                        # AG (33): Sl.No. *
-                str(it["desc"]),                  # AH (34): Product Description
-                "N",                              # AI (35): Is Service *
-                str(it["hsn"]),                   # AJ (36): HSN Code *
-                "",                               # AK (37): Bar Code
-                str(qty),                         # AL (38): Quantity *
-                "0",                              # AM (39): Free Quantity
-                str(it.get("unit", "PAC")),       # AN (40): Unit *
-                fmt_dec(price),                   # AO (41): Unit Price *
-                fmt_dec(gross_amt),               # AP (42): Gross Amount
-                fmt_dec(disc),                    # AQ (43): Discount
-                fmt_dec(gross_amt - disc),        # AR (44): Pre Tax Value (MATCHED TO STRIP)
-                fmt_dec(taxable),                 # AS (45): Taxable value * (MATCHED TO STRIP)
-                str(int(gst_rate)),               # AT (46): GST Rate (%) * (MATCHED TO STRIP)
-                fmt_dec(sgst),                    # AU (47): Sgst Amt(Rs) (MATCHED TO STRIP)
-                fmt_dec(cgst),                    # AV (48): Cgst Amt(Rs) (MATCHED TO STRIP)
-                fmt_dec(igst),                    # AW (49): Igst Amt(Rs) (MATCHED TO STRIP)
+                str(s_no),                                    # AG (33): Sl.No. *
+                str(it["desc"]),                              # AH (34): Product Description
+                "N",                                          # AI (35): Is Service *
+                str(it["hsn"]),                               # AJ (36): HSN Code *
+                "",                                           # AK (37): Bar Code
+                str(qty),                                     # AL (38): Quantity *
+                "0",                                          # AM (39): Free Quantity
+                str(it.get("unit", "PAC")),                   # AN (40): Unit *
+                fmt_dec(price),                               # AO (41): Unit Price *
+                fmt_dec(gross_amt),                           # AP (42): Gross Amount
+                fmt_dec(disc),                                # AQ (43): Discount (Item Level)
+                fmt_dec(gross_amt - disc),                    # AR (44): Pre Tax Value
+                fmt_dec(taxable),                             # AS (45): Taxable value *
+                str(int(gst_rate)),                           # AT (46): GST Rate (%) *
+                fmt_dec(sgst),                                # AU (47): Sgst Amt(Rs)
+                fmt_dec(cgst),                                # AV (48): Cgst Amt(Rs)
+                fmt_dec(igst),                                # AW (49): Igst Amt(Rs)
                 "0", "0.00", "0.00", "0", "0.00", "0.00", "0.00", # AX to BD (50 to 56): Cess & Other
-                fmt_dec(item_tot),                # BE (57): Item Total * (MATCHED TO STRIP)
+                fmt_dec(item_tot),                            # BE (57): Item Total *
                 # Spacer Cols (58 to 60: BF, BG, BH)
                 "", "", "",
                 # Value Details (61 to 70: BI-BR)
-                fmt_dec(tot_taxable),             # BI (61): Total Taxable value * (MATCHED TO STRIP)
-                fmt_dec(tot_sgst),                # BJ (62): Sgst Amt
-                fmt_dec(tot_cgst),                # BK (63): Cgst Amt
-                fmt_dec(tot_igst),                # BL (64): Igst Amt
-                "0.00",                           # BM (65): Cess Amt
-                "0.00",                           # BN (66): State Cess Amt
-                fmt_dec(tot_discount),            # BO (67): Discount (MATCHED TO STRIP)
-                "0.00",                           # BP (68): Other charges
-                fmt_dec(final_inv_val - calc_inv_val), # BQ (69): Round off
-                fmt_dec(final_inv_val),           # BR (70): Total Invoice value * (MATCHED TO STRIP)
+                fmt_dec(tot_taxable),                         # BI (61): Total Taxable value *
+                fmt_dec(tot_sgst),                            # BJ (62): Sgst Amt
+                fmt_dec(tot_cgst),                            # BK (63): Cgst Amt
+                fmt_dec(tot_igst),                            # BL (64): Igst Amt
+                "0.00",                                       # BM (65): Cess Amt
+                "0.00",                                       # BN (66): State Cess Amt
+                fmt_dec(tot_discount),                        # BO (67): Discount (Invoice Level Total)
+                "0.00",                                       # BP (68): Other charges
+                fmt_dec(exact_round_off),                     # BQ (69): Round off (Strict Max ±0.99)
+                fmt_dec(final_inv_val),                       # BR (70): Total Invoice value *
                 # Export Details (71 to 77: BS-BY)
                 "", "", "", "", "", "", "",
                 # E-way-bill Details (78 to 85: BZ-CG)
@@ -797,7 +811,7 @@ def generate_official_nic_v101_excel(data_list):
                 max_len = len(v_str)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
-    # EXACT HIDDEN COLUMNS MATCHING USER'S STRIP VIEW
+    # Exact Hidden Columns matching user's strip view
     hidden_cols = [
         'B', 'C',                          # Reverse Charge, e-Comm GSTIN
         'N', 'O', 'P', 'Q', 'R',           # Buyer Location, Pin Code, State, Phone, Email
@@ -827,6 +841,8 @@ def render_exact_government_einvoice_preview(meta):
     is_interstate = (seller_st != buyer_pos)
 
     tot_taxable = sum([it['taxable_val'] for it in meta['line_items']])
+    tot_discount = sum([it.get('discount', 0.0) for it in meta['line_items']])
+
     if is_interstate:
         tot_igst = round(tot_taxable * 0.05, 2)
         tot_cgst = 0.0
@@ -836,8 +852,9 @@ def render_exact_government_einvoice_preview(meta):
         tot_cgst = round(tot_taxable * 0.025, 2)
         tot_sgst = round(tot_taxable * 0.025, 2)
 
-    calc_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
-    grand_total = meta.get("printed_grand_total") if meta.get("printed_grand_total") else calc_total
+    exact_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
+    grand_total = round(exact_total)
+    round_off = round(grand_total - exact_total, 2)
     ack_date_str = f"{meta['clean_date']} 17:0:00"
 
     table_rows = ""
@@ -1052,6 +1069,10 @@ table.items th {{
                         <td style="text-align: right; font-weight: bold;">₹{tot_taxable:.2f}</td>
                     </tr>
                     <tr>
+                        <td>Total Discount :</td>
+                        <td style="text-align: right; color: #dc2626;">₹{tot_discount:.2f}</td>
+                    </tr>
+                    <tr>
                         <td>Total CGST :</td>
                         <td style="text-align: right;">₹{tot_cgst:.2f}</td>
                     </tr>
@@ -1062,6 +1083,10 @@ table.items th {{
                     <tr>
                         <td>Total IGST :</td>
                         <td style="text-align: right;">₹{tot_igst:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td>Round Off :</td>
+                        <td style="text-align: right;">₹{round_off:.2f}</td>
                     </tr>
                     <tr style="border-top: 1.5px solid #000; font-size: 13px; font-weight: bold;">
                         <td>Total Invoice Value :</td>
