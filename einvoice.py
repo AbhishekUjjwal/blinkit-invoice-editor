@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Exact Replica of Official eInvoice.xlsm Template + Matching Schema v1.01 JSON</p>
+        <p style="color: #94a3b8; font-size: 14px;">Exact Replica of Official eInvoice.xlsm (Hidden Columns View) + Schema v1.01 JSON</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -552,7 +552,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% REPLICA OF USER's eInvoice.xlsm UTILITY -----------------
+# ----------------- 100% REPLICA OF USER's eInvoice.xlsm UTILITY (WITH HIDDEN COLUMNS) -----------------
 
 def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
@@ -560,7 +560,6 @@ def generate_official_nic_v101_excel(data_list):
     ws.title = "eInvoice"
     ws.views.sheetView[0].showGridLines = True
 
-    # Color Fills matching User's xlsm template
     c_supply = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
     c_doc = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
     c_buyer = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
@@ -584,7 +583,6 @@ def generate_official_nic_v101_excel(data_list):
         bottom=Side(style='thin', color='B0B0B0')
     )
 
-    # Title Banner (Row 1-2)
     ws.merge_cells("H1:L2")
     ws["H1"] = "E-Invoice System"
     ws["H1"].font = font_title
@@ -596,7 +594,6 @@ def generate_official_nic_v101_excel(data_list):
     ws["M1"].font = font_btn
     ws["M1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # Section Headers (Row 3)
     sections = [
         ("Supply Details", 1, 4, c_supply),
         ("Document Details", 5, 7, c_doc),
@@ -618,8 +615,6 @@ def generate_official_nic_v101_excel(data_list):
         for i in range(sc, ec + 1):
             ws.cell(row=3, column=i).border = thin_border
 
-    # Exact Column Names from Photo (Row 4)
-    # A to CG (Total 85 Columns)
     col_names = [
         # Supply Details (1 to 4: A-D)
         "Supply Type Code *", "Reverse Charge", "e-Comm GSTIN", "Igst On Intra",
@@ -724,7 +719,6 @@ def generate_official_nic_v101_excel(data_list):
 
             item_tot = round(taxable + cgst + sgst + igst, 2)
 
-            # Build exact 85 Columns Data Row
             row_data = [
                 # Supply Details (A to D)
                 "B2B", "N", "", "N",
@@ -743,8 +737,8 @@ def generate_official_nic_v101_excel(data_list):
                 fmt_dec(price), fmt_dec(gross_amt), fmt_dec(disc), fmt_dec(gross_amt - disc),
                 fmt_dec(taxable), str(int(gst_rate)), fmt_dec(sgst), fmt_dec(cgst), fmt_dec(igst),
                 "0", "0", "0", "0", "0", "0", "0", fmt_dec(item_tot),
-                "", "", "", # Batch cols
-                "", "", "", # Spacers (BF, BG, BH)
+                "", "", "",
+                "", "", "",
                 # Value Details (BI to BR)
                 fmt_dec(tot_taxable), fmt_dec(tot_sgst), fmt_dec(tot_cgst), fmt_dec(tot_igst),
                 "0.00", "0.00", fmt_dec(tot_discount), "0.00", fmt_dec(final_inv_val - calc_inv_val), fmt_dec(final_inv_val),
@@ -768,14 +762,7 @@ def generate_official_nic_v101_excel(data_list):
 
             curr_row += 1
 
-    # Exact Bottom Sheet Tabs matching User's XLSM
-    tabs = ["Welcome", "Profile", "Master Codes", "Sample Invoice", "Format A,B,C,D", "Schema", "Validation", "Calculations", "FAQs"]
-    for t in tabs:
-        d_ws = wb.create_sheet(title=t)
-        d_ws.sheet_view.showGridLines = True
-        d_ws["A1"] = f"{t} - Official e-Invoice System Utility"
-        d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
-
+    # Auto-adjust column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -787,12 +774,29 @@ def generate_official_nic_v101_excel(data_list):
                 max_len = len(v_str)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
+    # ----------------- HIDE COLUMNS TO MATCH USER'S EXACT PICTURE -----------------
+    hidden_cols = [
+        'B', 'C',                          # Reverse Charge, e-Comm GSTIN
+        'N', 'O', 'P', 'Q', 'R',           # Buyer Location, Pin Code, State, Phone, Email
+        'AI', 'AJ', 'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ',  # Is Service, HSN, Qty, Unit, Price, Gross, Discount, Pre Tax
+        'BF', 'BG', 'BH'                   # Batch Spacers
+    ]
+    for hc in hidden_cols:
+        ws.column_dimensions[hc].hidden = True
+
+    tabs = ["Welcome", "Profile", "Master Codes", "Sample Invoice", "Format A,B,C,D", "Schema", "Validation", "Calculations", "FAQs"]
+    for t in tabs:
+        d_ws = wb.create_sheet(title=t)
+        d_ws.sheet_view.showGridLines = True
+        d_ws["A1"] = f"{t} - Official e-Invoice System Utility"
+        d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
+
     out_io = io.BytesIO()
     wb.save(out_io)
     out_io.seek(0)
     return out_io
 
-# ----------------- CLEAN EXACT GOVERNMENT E-INVOICE PREVIEW (HTML COMPONENT) -----------------
+# ----------------- CLEAN EXACT GOVERNMENT E-INVOICE PREVIEW -----------------
 
 def render_exact_government_einvoice_preview(meta):
     seller_st = meta['seller_state_code']
@@ -903,7 +907,7 @@ table.items th {{
 </head>
 <body>
 <div class="invoice-box">
-    <!-- TOP HEADER: GSTIN, COMPANY NAME & BIG QR CODE -->
+    <!-- TOP HEADER -->
     <table style="width: 100%; border-collapse: collapse; margin-bottom: 8px;">
         <tr>
             <td style="vertical-align: top; width: 75%;">
@@ -960,7 +964,7 @@ table.items th {{
         </table>
     </div>
 
-    <!-- SECTION 3: Party Details (Supplier & Recipient) -->
+    <!-- SECTION 3: Party Details -->
     <div class="sec-title">3. Party Details</div>
     <div style="border: 1px solid #000; border-top: none; margin-bottom: 8px;">
         <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
@@ -987,7 +991,7 @@ table.items th {{
         </table>
     </div>
 
-    <!-- SECTION 4: Details of Goods / Services (Exact 11 Columns) -->
+    <!-- SECTION 4: Details of Goods / Services -->
     <div class="sec-title">4. Details of Goods / Services</div>
     <table class="items">
         <thead>
@@ -1116,7 +1120,7 @@ if uploaded_invoices:
                     mime="application/json"
                 )
 
-            # LIVE GOVERNMENT FORMAT PREVIEW (RENDERED VIA IFRAME COMPONENT)
+            # LIVE GOVERNMENT FORMAT PREVIEW
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("### 📄 Official Government e-Invoice Live Preview")
             
