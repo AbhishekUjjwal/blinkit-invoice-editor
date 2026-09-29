@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Strict Table Header Detection | Real Item Rows Only | Accurate Description & Col AR Blank</p>
+        <p style="color: #94a3b8; font-size: 14px;">Gross Amount = Taxable + Discount | Pre Tax Value Blank (Col AR) | Official Schema</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -276,7 +276,7 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
-        # 1. Strictly find the REAL Table Header line Y coordinate
+        # Strictly detect real Table Header row Y
         table_header_bottom_y = 200
         y_groups = {}
         for w in words:
@@ -286,7 +286,6 @@ def process_and_reconcile_pdf(pdf_bytes):
         for y_key, g_words in sorted(y_groups.items()):
             texts = [w[4].lower() for w in g_words]
             full_line = " ".join(texts)
-            # A true table header must contain at least 2 of these table column headers
             matches = sum(1 for k in ["hsn", "qty", "quantity", "unit price", "price", "rate", "taxable", "s.no", "item code"] if k in full_line)
             if matches >= 2:
                 table_header_bottom_y = max(w[3] for w in g_words)
@@ -298,7 +297,7 @@ def process_and_reconcile_pdf(pdf_bytes):
             if w[1] > (table_header_bottom_y + 30) and any(k in wt for k in ["total", "subtotal", "gst summary", "summary", "words"]):
                 table_bottom_y = min(table_bottom_y, w[1])
 
-        # 2. S.No candidates MUST be strictly BELOW the table header
+        # S.No candidates must strictly be below the real table header
         sno_candidates = []
         for w in words:
             val = w[4].strip()
@@ -340,13 +339,12 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                 hsn_x0 = hsn_w[0] if hsn_w else 220
 
-                # 2. Perfect Description (Strictly between S.No and HSN)
+                # 2. Asli Clean Description (Strictly between S.No and HSN)
                 desc_words = [w for w in row_words if 30 <= w[0] < (hsn_x0 - 4) and not w[4].isdigit()]
                 desc_words.sort(key=lambda w: (round(w[1] / 6) * 6, w[0]))
                 raw_desc = " ".join([w[4] for w in desc_words]).strip()
                 pure_desc = clean_description_completely(raw_desc, hsn_code=hsn_code)
 
-                # Skip address pollution or non-product lines
                 if any(k in pure_desc.lower() for k in ["private limited", "tehsil", "district", "kumaspur", "cod charge", "shipping charge", "item code"]):
                     continue
 
@@ -369,7 +367,6 @@ def process_and_reconcile_pdf(pdf_bytes):
                 for w in search_words:
                     val = w[4].replace(",", "").strip()
                     if re.match(r"^\d+(\.\d{1,2})?$", val):
-                        # Skip phone numbers (e.g. 10 digits)
                         if len(val) >= 9:
                             continue
                         after_hsn_nums.append({
@@ -401,14 +398,16 @@ def process_and_reconcile_pdf(pdf_bytes):
                         final_taxable = after_hsn_nums[3]["val"]
 
                 if final_q is not None and final_p is not None and final_q > 0:
-                    gross_amt = round(final_q * final_p, 2)
-
+                    # Calculate Taxable Value
                     if final_taxable is not None and final_taxable > 0:
                         taxable_val = final_taxable
-                        if gross_amt > taxable_val and final_disc == 0.0:
-                            final_disc = round(gross_amt - taxable_val, 2)
                     else:
-                        taxable_val = round(gross_amt - final_disc, 2)
+                        taxable_val = round((final_q * final_p) - final_disc, 2)
+
+                    # USER DIRECTIVE:
+                    # Gross Amount ki value discount value aur taxable value ko add karke banana hai!
+                    # Gross Amount = Taxable Value + Discount Value
+                    gross_amt = round(taxable_val + final_disc, 2)
 
                     unit_label = "BOX" if (is_blinkit and factor > 1) else "PAC"
                     line_items.append({
@@ -418,7 +417,7 @@ def process_and_reconcile_pdf(pdf_bytes):
                         "qty": final_q,
                         "unit": unit_label,
                         "unit_price": final_p,
-                        "gross_amt": gross_amt,
+                        "gross_amt": gross_amt,       # Taxable + Discount
                         "discount": final_disc,
                         "taxable_val": taxable_val,
                         "gst_rate": 5.0
@@ -485,7 +484,7 @@ def build_einvoice_json_v101(data):
             "Qty": qty,
             "Unit": unit_label,
             "UnitPrice": round(unit_price, 2),
-            "TotAmt": round(item.get("gross_amt", taxable_amt), 2),
+            "TotAmt": round(item.get("gross_amt", taxable_amt), 2),  # Taxable + Discount
             "Discount": round(item.get("discount", 0.0), 2),
             "AssAmt": round(taxable_amt, 2),
             "GstRt": gst_rate,
@@ -561,7 +560,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% POPULATED EXCEL GENERATOR (RAW BYTES) -----------------
+# ----------------- 100% ACCURATE EXCEL GENERATOR (RAW BYTES) -----------------
 
 def generate_official_nic_v101_excel_bytes(data_list):
     wb = openpyxl.Workbook()
@@ -694,9 +693,10 @@ def generate_official_nic_v101_excel_bytes(data_list):
         for it in inv["line_items"]:
             qty = it["qty"]
             price = it["unit_price"]
-            gross_amt = it.get("gross_amt", round(qty * price, 2))
             disc = it.get("discount", 0.0)
-            taxable = it.get("taxable_val", gross_amt)
+            taxable = it.get("taxable_val", round(qty * price, 2))
+            # Exact rule: Gross = Taxable + Discount
+            gross_amt = round(taxable + disc, 2)
             gst_rate = it.get("gst_rate", 5.0)
 
             tot_taxable += taxable
@@ -736,6 +736,9 @@ def generate_official_nic_v101_excel_bytes(data_list):
         for s_no, r_data in enumerate(item_rows_data, 1):
             it = r_data["it"]
 
+            # FULLY VISIBLE & POPULATED FIELDS (Col AJ, AL, AN, AO, AP, AQ)
+            # GROSS AMOUNT = TAXABLE + DISCOUNT
+            # ONLY PRE TAX VALUE (Col AR) IS KEPT BLANK
             row_data = [
                 # Supply Details (1 to 4: A-D)
                 "B2B", "N", "", "N",
@@ -753,15 +756,15 @@ def generate_official_nic_v101_excel_bytes(data_list):
                 str(s_no),                                    # AG (33): Sl.No. *
                 str(it["desc"]),                              # AH (34): Asli Clean Product Description
                 "N",                                          # AI (35): Is Service *
-                str(it["hsn"]),                               # AJ (36): HSN Code *
+                str(it["hsn"]),                               # AJ (36): HSN Code * (VISIBLE & POPULATED)
                 "",                                           # AK (37): Bar Code
-                str(r_data["qty"]),                           # AL (38): Quantity *
+                str(r_data["qty"]),                           # AL (38): Quantity * (VISIBLE & POPULATED)
                 "0",                                          # AM (39): Free Quantity
-                str(it.get("unit", "PAC")),                   # AN (40): Unit *
-                fmt_dec(r_data["price"]),                     # AO (41): Unit Price *
-                fmt_dec(r_data["gross_amt"]),                 # AP (42): Gross Amount
-                fmt_dec(r_data["disc"]),                      # AQ (43): Discount (Item Level)
-                "",                                           # AR (44): Pre Tax Value (100% BLANK)
+                str(it.get("unit", "PAC")),                   # AN (40): Unit * (VISIBLE & POPULATED)
+                fmt_dec(r_data["price"]),                     # AO (41): Unit Price * (VISIBLE & POPULATED)
+                fmt_dec(r_data["gross_amt"]),                 # AP (42): Gross Amount = Taxable + Discount
+                fmt_dec(r_data["disc"]),                      # AQ (43): Discount (VISIBLE & POPULATED)
+                "",                                           # AR (44): Pre Tax Value (STRICTLY BLANK)
                 fmt_dec(r_data["taxable"]),                   # AS (45): Taxable value *
                 str(int(r_data["gst_rate"])),                 # AT (46): GST Rate (%) *
                 fmt_dec(r_data["sgst"]),                      # AU (47): Sgst Amt(Rs)
@@ -812,16 +815,6 @@ def generate_official_nic_v101_excel_bytes(data_list):
             if len(v_str) > max_len:
                 max_len = len(v_str)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
-
-    # Hidden Columns matching utility view
-    hidden_cols = [
-        'B', 'C',                          # Reverse Charge, e-Comm GSTIN
-        'N', 'O', 'P', 'Q', 'R',           # Buyer Location, Pin Code, State, Phone, Email
-        'AI', 'AJ', 'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ',  # Is Service to Discount
-        'BF', 'BG', 'BH'                   # Spacer Buffer Columns
-    ]
-    for hc in hidden_cols:
-        ws.column_dimensions[hc].hidden = True
 
     tabs = ["Welcome", "Profile", "Master Codes", "Sample Invoice", "Format A,B,C,D", "Schema", "Validation", "Calculations", "FAQs"]
     for t in tabs:
