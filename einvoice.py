@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Exact Replica of Official eInvoice.xlsm (Hidden Columns View) + Schema v1.01 JSON</p>
+        <p style="color: #94a3b8; font-size: 14px;">100% Exact Column-Aligned to User's Strip | Pre Tax (AR) & Taxable (AS) Fixed</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -552,7 +552,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% REPLICA OF USER's eInvoice.xlsm UTILITY (WITH HIDDEN COLUMNS) -----------------
+# ----------------- 100% EXACT COLUMN-ALIGNED EXCEL GENERATOR (A to CG) -----------------
 
 def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
@@ -615,6 +615,7 @@ def generate_official_nic_v101_excel(data_list):
         for i in range(sc, ec + 1):
             ws.cell(row=3, column=i).border = thin_border
 
+    # EXACT 85 COLUMNS MATCHING USER'S STRIP PHOTO
     col_names = [
         # Supply Details (1 to 4: A-D)
         "Supply Type Code *", "Reverse Charge", "e-Comm GSTIN", "Igst On Intra",
@@ -629,11 +630,10 @@ def generate_official_nic_v101_excel(data_list):
         # Shipping Details (25 to 32: Y-AF)
         "Shipping GSTIN", "Shipping Legal Name", "Shipping Trade Name", "Shipping Addr1", "Shipping Addr2", "Shipping Location", "Shipping Pin Code", "Shipping State",
         # Product Details (33 to 57: AG-BE)
-        "Sl.No. *", "Product Description", "Is Service *", "HSN Code *", "Quantity *", "Unit *", "Unit Price *",
+        "Sl.No. *", "Product Description", "Is Service *", "HSN Code *", "Bar Code", "Quantity *", "Free Quantity", "Unit *", "Unit Price *",
         "Gross Amount", "Discount", "Pre Tax Value", "Taxable value *", "GST Rate (%) *", "Sgst Amt(Rs)", "Cgst Amt(Rs)",
         "Igst Amt(Rs)", "Cess Rate (%)", "Cess Amt Adval (Rs)", "Cess Non Adval Amt (Rs)", "State Cess Rate (%)",
         "State Cess Adval Amt (Rs)", "State Cess Non-Adval Amt (Rs)", "Other Charges", "Item Total *",
-        "Batch Name", "Batch Expiry Date", "Warranty Date",
         # Spacer Cols (58 to 60: BF, BG, BH)
         "", "", "",
         # Value Details (61 to 70: BI-BR)
@@ -719,32 +719,56 @@ def generate_official_nic_v101_excel(data_list):
 
             item_tot = round(taxable + cgst + sgst + igst, 2)
 
+            # EXACT 85 COLUMNS VALUES MATCHING USER'S STRIP
             row_data = [
-                # Supply Details (A to D)
+                # Supply Details (1 to 4: A-D)
                 "B2B", "N", "", "N",
-                # Document Details (E to G)
+                # Document Details (5 to 7: E-G)
                 "Tax Invoice", str(inv["invoice_no"]), str(inv["doc_date"]),
-                # Buyer Details (H to R)
+                # Buyer Details (8 to 18: H-R)
                 str(inv["buyer_gstin"]), str(inv["buyer_name"]), str(inv["buyer_trade_name"]), pos_str,
                 str(inv["buyer_addr1"]), "", str(inv["buyer_loc"]), str(inv["buyer_pin"]),
                 str(inv["buyer_state_name"]), str(inv["buyer_phone"]), str(inv["buyer_email"]),
-                # Dispatch Details (S to X)
+                # Dispatch Details (19 to 24: S-X)
                 "", "", "", "", "", "",
-                # Shipping Details (Y to AF)
+                # Shipping Details (25 to 32: Y-AF)
                 *ship_vals,
-                # Product Details (AG to BE)
-                str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "PAC")),
-                fmt_dec(price), fmt_dec(gross_amt), fmt_dec(disc), fmt_dec(gross_amt - disc),
-                fmt_dec(taxable), str(int(gst_rate)), fmt_dec(sgst), fmt_dec(cgst), fmt_dec(igst),
-                "0", "0", "0", "0", "0", "0", "0", fmt_dec(item_tot),
+                # Product Details (33 to 57: AG-BE)
+                str(s_no),                        # AG (33): Sl.No. *
+                str(it["desc"]),                  # AH (34): Product Description
+                "N",                              # AI (35): Is Service *
+                str(it["hsn"]),                   # AJ (36): HSN Code *
+                "",                               # AK (37): Bar Code
+                str(qty),                         # AL (38): Quantity *
+                "0",                              # AM (39): Free Quantity
+                str(it.get("unit", "PAC")),       # AN (40): Unit *
+                fmt_dec(price),                   # AO (41): Unit Price *
+                fmt_dec(gross_amt),               # AP (42): Gross Amount
+                fmt_dec(disc),                    # AQ (43): Discount
+                fmt_dec(gross_amt - disc),        # AR (44): Pre Tax Value (MATCHED TO STRIP)
+                fmt_dec(taxable),                 # AS (45): Taxable value * (MATCHED TO STRIP)
+                str(int(gst_rate)),               # AT (46): GST Rate (%) * (MATCHED TO STRIP)
+                fmt_dec(sgst),                    # AU (47): Sgst Amt(Rs) (MATCHED TO STRIP)
+                fmt_dec(cgst),                    # AV (48): Cgst Amt(Rs) (MATCHED TO STRIP)
+                fmt_dec(igst),                    # AW (49): Igst Amt(Rs) (MATCHED TO STRIP)
+                "0", "0.00", "0.00", "0", "0.00", "0.00", "0.00", # AX to BD (50 to 56): Cess & Other
+                fmt_dec(item_tot),                # BE (57): Item Total * (MATCHED TO STRIP)
+                # Spacer Cols (58 to 60: BF, BG, BH)
                 "", "", "",
-                "", "", "",
-                # Value Details (BI to BR)
-                fmt_dec(tot_taxable), fmt_dec(tot_sgst), fmt_dec(tot_cgst), fmt_dec(tot_igst),
-                "0.00", "0.00", fmt_dec(tot_discount), "0.00", fmt_dec(final_inv_val - calc_inv_val), fmt_dec(final_inv_val),
-                # Export Details (BS to BY)
+                # Value Details (61 to 70: BI-BR)
+                fmt_dec(tot_taxable),             # BI (61): Total Taxable value * (MATCHED TO STRIP)
+                fmt_dec(tot_sgst),                # BJ (62): Sgst Amt
+                fmt_dec(tot_cgst),                # BK (63): Cgst Amt
+                fmt_dec(tot_igst),                # BL (64): Igst Amt
+                "0.00",                           # BM (65): Cess Amt
+                "0.00",                           # BN (66): State Cess Amt
+                fmt_dec(tot_discount),            # BO (67): Discount (MATCHED TO STRIP)
+                "0.00",                           # BP (68): Other charges
+                fmt_dec(final_inv_val - calc_inv_val), # BQ (69): Round off
+                fmt_dec(final_inv_val),           # BR (70): Total Invoice value * (MATCHED TO STRIP)
+                # Export Details (71 to 77: BS-BY)
                 "", "", "", "", "", "", "",
-                # E-way-bill Details (BZ to CG)
+                # E-way-bill Details (78 to 85: BZ-CG)
                 "", "", "", "", "", "", "", ""
             ]
 
@@ -753,16 +777,15 @@ def generate_official_nic_v101_excel(data_list):
                 cell.font = font_data
                 cell.border = thin_border
                 cell.number_format = '@'
-                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 25, 31, 32, 33, 35, 36, 38, 44]:
+                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 25, 31, 32, 33, 35, 36, 38, 40, 46]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
-                elif c_idx in [37, 39, 40, 41, 42, 43, 45, 46, 47, 55, 61, 62, 63, 64, 67, 69, 70]:
+                elif c_idx in [41, 42, 43, 44, 45, 47, 48, 49, 57, 61, 62, 63, 64, 67, 69, 70]:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
 
             curr_row += 1
 
-    # Auto-adjust column widths
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -774,12 +797,12 @@ def generate_official_nic_v101_excel(data_list):
                 max_len = len(v_str)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
-    # ----------------- HIDE COLUMNS TO MATCH USER'S EXACT PICTURE -----------------
+    # EXACT HIDDEN COLUMNS MATCHING USER'S STRIP VIEW
     hidden_cols = [
         'B', 'C',                          # Reverse Charge, e-Comm GSTIN
         'N', 'O', 'P', 'Q', 'R',           # Buyer Location, Pin Code, State, Phone, Email
-        'AI', 'AJ', 'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ',  # Is Service, HSN, Qty, Unit, Price, Gross, Discount, Pre Tax
-        'BF', 'BG', 'BH'                   # Batch Spacers
+        'AI', 'AJ', 'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ',  # Is Service to Discount
+        'BF', 'BG', 'BH'                   # Spacer Buffer Columns
     ]
     for hc in hidden_cols:
         ws.column_dimensions[hc].hidden = True
