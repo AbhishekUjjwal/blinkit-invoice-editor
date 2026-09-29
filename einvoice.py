@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Exact Discount Captured (Col AQ & BO) | Strict GST Round Off (Max ±0.99) | Official Template</p>
+        <p style="color: #94a3b8; font-size: 14px;">Any Buyer Supported | Blinkit Auto Box Fix | Accurate Discount & Strict Round Off</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -77,7 +77,7 @@ def clean_description_completely(desc, hsn_code=None):
     desc = re.sub(r"\s+", " ", desc).strip()
     return desc
 
-# ----------------- COORDINATE & METADATA EXTRACTION -----------------
+# ----------------- UNIVERSAL METADATA EXTRACTION -----------------
 
 def extract_metadata_from_doc(doc):
     full_text = ""
@@ -240,7 +240,7 @@ def extract_metadata_from_doc(doc):
         "printed_grand_total": printed_grand_total
     }
 
-# ----------------- PARSING WITH EXACT DISCOUNT AND TAXABLE DETECTION -----------------
+# ----------------- PARSING WITH ACCURATE DISCOUNT & ANY BUYER SUPPORT -----------------
 
 def overwrite_area(page, rect, new_text, font_size=7):
     pad_rect = fitz.Rect(rect.x0 - 2, rect.y0 - 1, rect.x1 + 2, rect.y1 + 1)
@@ -256,6 +256,7 @@ def process_and_reconcile_pdf(pdf_bytes):
     for page in doc:
         words = page.get_text("words")
 
+        # Initial Anchors
         sno_anchor_x = 48
         hsn_min_x = 185
         hsn_max_x = 265
@@ -264,16 +265,17 @@ def process_and_reconcile_pdf(pdf_bytes):
         disc_left = 375
         tax_left = 425
 
+        # Dynamically Detect Column Headers from PDF
         for w in words:
             wt = w[4].lower().strip()
             if wt in ["s.no", "sl.no", "s.no."]:
-                sno_anchor_x = w[2] + 4
+                sno_anchor_x = max(sno_anchor_x, w[2] + 4)
             elif wt == "hsn":
-                hsn_min_x = w[0] - 12
+                hsn_min_x = w[0] - 14
                 hsn_max_x = w[2] + 35
-            elif wt == "qty":
+            elif wt in ["qty", "quantity"]:
                 qty_left = w[0] - 8
-            elif "price" in wt or "unit" in wt or "rate" in wt:
+            elif "price" in wt or "rate" in wt:
                 price_left = w[0] - 8
             elif "disc" in wt:
                 disc_left = w[0] - 8
@@ -284,7 +286,7 @@ def process_and_reconcile_pdf(pdf_bytes):
         for w in words:
             val = w[4].strip()
             if val.isdigit() and 1 <= int(val) <= 99:
-                if w[0] <= sno_anchor_x and w[1] > 240:
+                if w[0] <= sno_anchor_x and w[1] > 200:
                     if not any(abs(c["center_y"] - ((w[1]+w[3])/2)) < 8 for c in sno_candidates):
                         sno_candidates.append({
                             "sno": int(val),
@@ -295,35 +297,27 @@ def process_and_reconcile_pdf(pdf_bytes):
 
         sno_candidates.sort(key=lambda x: x["center_y"])
 
-        table_bottom_y = page.rect.height - 50
-        total_indicators = [w for w in words if w[1] > 350 and any(k in w[4].lower() for k in ["total", "subtotal", "taxable value", "amount in words"])]
+        table_bottom_y = page.rect.height - 40
+        total_indicators = [w for w in words if w[1] > 300 and any(k in w[4].lower() for k in ["total", "subtotal", "taxable value", "gst summary", "amount in words"])]
         if total_indicators:
             table_bottom_y = min([w[1] for w in total_indicators]) - 4
 
         if sno_candidates:
             for idx, item_anchor in enumerate(sno_candidates):
-                y_top = item_anchor["y0"] - 3
+                y_top = item_anchor["y0"] - 4
                 if idx + 1 < len(sno_candidates):
                     y_bottom = sno_candidates[idx + 1]["y0"] - 2
                 else:
-                    y_bottom = min(item_anchor["y1"] + 120, table_bottom_y)
+                    y_bottom = min(item_anchor["y1"] + 110, table_bottom_y)
 
                 row_words = [w for w in words if y_top <= ((w[1] + w[3]) / 2) <= y_bottom]
 
                 # 1. HSN Code
-                hsn_box_rect = fitz.Rect(hsn_min_x, y_top, hsn_max_x, y_bottom)
-                hsn_clip_text = page.get_text("text", clip=hsn_box_rect)
-                hsn_matches = re.findall(r"\b(\d{6,8})\b", hsn_clip_text)
-
-                if hsn_matches:
-                    hsn_code = hsn_matches[0]
-                else:
-                    candidates = [
-                        w[4].replace(",", "").strip() for w in row_words 
-                        if (hsn_min_x - 15) <= w[0] <= (hsn_max_x + 15) and w[4].replace(",", "").strip().isdigit()
-                    ]
-                    valid_hsns = [c for c in candidates if len(c) in [6, 7, 8]]
-                    hsn_code = valid_hsns[0] if valid_hsns else "63079091"
+                valid_hsns = [
+                    w[4].replace(",", "").strip() for w in row_words 
+                    if (hsn_min_x - 15) <= w[0] <= (hsn_max_x + 15) and w[4].replace(",", "").strip().isdigit() and len(w[4].replace(",", "").strip()) in [6, 7, 8]
+                ]
+                hsn_code = valid_hsns[0] if valid_hsns else "90183990"
 
                 actual_hsn_x = hsn_min_x
                 for w in row_words:
@@ -331,10 +325,10 @@ def process_and_reconcile_pdf(pdf_bytes):
                         actual_hsn_x = min(actual_hsn_x, w[0])
                         break
 
+                # 2. Product Description
                 item_right_boundary = actual_hsn_x - 4
                 item_box_rect = fitz.Rect(sno_anchor_x, y_top, item_right_boundary, y_bottom)
                 raw_item_text = page.get_text("text", clip=item_box_rect).strip()
-
                 lines = [l.strip() for l in raw_item_text.split("\n") if l.strip()]
                 raw_desc = " ".join(lines).strip()
 
@@ -342,6 +336,11 @@ def process_and_reconcile_pdf(pdf_bytes):
                 if not pure_desc:
                     pure_desc = f"Item {item_anchor['sno']}"
 
+                # Skip non-product charge rows if qty is 0 or empty
+                if any(k in pure_desc.lower() for k in ["cod charge", "shipping charge"]):
+                    continue
+
+                # Blinkit Rule: 50x / 25x conversion ONLY for Blinkit buyer
                 factor = 1
                 if is_blinkit:
                     upper_desc = pure_desc.upper()
@@ -355,13 +354,13 @@ def process_and_reconcile_pdf(pdf_bytes):
                 printed_taxable = None
                 raw_extracted_disc = 0.0
 
-                # 2. Quantity
-                qty_box_rect = fitz.Rect(qty_left - 2, y_top, price_left - 2, y_bottom)
+                # 3. Quantity
+                qty_box_rect = fitz.Rect(qty_left - 10, y_top, price_left - 2, y_bottom)
                 for w in words:
                     if qty_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
                         val = w[4].replace(",", "").strip()
                         rect = fitz.Rect(w[0], w[1], w[2], w[3])
-                        if val.isdigit() and len(val) != 8:
+                        if val.isdigit() and len(val) <= 6:
                             orig_q = int(val)
                             if factor > 1 and orig_q >= factor:
                                 final_q = orig_q // factor
@@ -370,8 +369,8 @@ def process_and_reconcile_pdf(pdf_bytes):
                                 final_q = orig_q
                             break
 
-                # 3. Unit Price
-                price_box_rect = fitz.Rect(price_left - 2, y_top, disc_left - 2, y_bottom)
+                # 4. Unit Price
+                price_box_rect = fitz.Rect(price_left - 10, y_top, disc_left - 2, y_bottom)
                 for w in words:
                     if price_box_rect.contains(fitz.Point((w[0]+w[2])/2, (w[1]+w[3])/2)):
                         val = w[4].replace(",", "").strip()
@@ -386,27 +385,29 @@ def process_and_reconcile_pdf(pdf_bytes):
                                     final_p = orig_p
                                 break
 
-                # 4. Taxable Value (Printed directly on Invoice)
-                tax_box_rect = fitz.Rect(tax_left - 4, y_top, tax_left + 90, y_bottom)
-                raw_tax_text = page.get_text("text", clip=tax_box_rect)
-                tax_m = re.findall(r"\b\d+[.,]\d{2}\b", raw_tax_text)
-                if tax_m:
-                    printed_taxable = float(tax_m[0].replace(",", ""))
-
-                # 5. Discount (Extracted from column or mathematically resolved)
-                disc_box_rect = fitz.Rect(disc_left - 4, y_top, tax_left - 2, y_bottom)
+                # 5. Discount Column (Direct extraction)
+                disc_box_rect = fitz.Rect(disc_left - 10, y_top, tax_left - 2, y_bottom)
                 raw_disc_text = page.get_text("text", clip=disc_box_rect)
                 disc_m = re.findall(r"\b\d+(?:\.\d{1,2})?\b", raw_disc_text)
                 if disc_m:
                     raw_extracted_disc = float(disc_m[0])
 
-                if final_q is not None and final_p is not None:
+                # 6. Taxable Value (Direct extraction)
+                tax_box_rect = fitz.Rect(tax_left - 10, y_top, tax_left + 90, y_bottom)
+                raw_tax_text = page.get_text("text", clip=tax_box_rect)
+                tax_m = re.findall(r"\b\d+[.,]\d{2}\b", raw_tax_text)
+                if tax_m:
+                    printed_taxable = float(tax_m[0].replace(",", ""))
+
+                if final_q is not None and final_p is not None and final_q > 0:
                     gross_amt = round(final_q * final_p, 2)
 
-                    # Fail-Safe Discount & Taxable Reconciliation
+                    # Mathematical Reconcile:
+                    # If taxable is clearly printed on invoice:
                     if printed_taxable is not None and printed_taxable > 0:
                         taxable_val = printed_taxable
-                        if gross_amt > taxable_val:
+                        # If gross > taxable, exact discount is the difference!
+                        if gross_amt > taxable_val and raw_extracted_disc == 0.0:
                             final_discount = round(gross_amt - taxable_val, 2)
                         else:
                             final_discount = raw_extracted_disc
@@ -416,7 +417,7 @@ def process_and_reconcile_pdf(pdf_bytes):
 
                     unit_label = "BOX" if (is_blinkit and factor > 1) else "PAC"
                     line_items.append({
-                        "sno": item_anchor["sno"],
+                        "sno": len(line_items) + 1,
                         "desc": pure_desc,
                         "hsn": hsn_code,
                         "qty": final_q,
@@ -501,6 +502,7 @@ def build_einvoice_json_v101(data):
             "TotItemVal": tot_item_val
         })
 
+    # Strict GST Rounding: Max ±0.99
     exact_calc_total = round(tot_taxable + tot_cgst + tot_sgst + tot_igst, 2)
     final_rounded_total = round(exact_calc_total)
     round_off_amt = round(final_rounded_total - exact_calc_total, 2)
@@ -565,9 +567,9 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- 100% EXACT COLUMN-ALIGNED EXCEL GENERATOR (A to CG) -----------------
+# ----------------- 100% POPULATED EXCEL GENERATOR (RAW BYTES OUTPUT) -----------------
 
-def generate_official_nic_v101_excel(data_list):
+def generate_official_nic_v101_excel_bytes(data_list):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "eInvoice"
@@ -811,7 +813,7 @@ def generate_official_nic_v101_excel(data_list):
                 max_len = len(v_str)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
-    # Exact Hidden Columns matching user's strip view
+    # Hidden Columns matching utility view
     hidden_cols = [
         'B', 'C',                          # Reverse Charge, e-Comm GSTIN
         'N', 'O', 'P', 'Q', 'R',           # Buyer Location, Pin Code, State, Phone, Email
@@ -828,10 +830,12 @@ def generate_official_nic_v101_excel(data_list):
         d_ws["A1"] = f"{t} - Official e-Invoice System Utility"
         d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
 
+    # Set eInvoice as the primary active sheet
+    wb.active = ws
+
     out_io = io.BytesIO()
     wb.save(out_io)
-    out_io.seek(0)
-    return out_io
+    return out_io.getvalue()
 
 # ----------------- CLEAN EXACT GOVERNMENT E-INVOICE PREVIEW -----------------
 
@@ -1121,7 +1125,7 @@ if uploaded_invoices:
         st.success(f"✅ Successfully processed {len(processed_docs)} Invoices!")
         
         parsed_invoices = [doc["meta"] for doc in processed_docs]
-        excel_buffer = generate_official_nic_v101_excel(parsed_invoices)
+        excel_raw_bytes = generate_official_nic_v101_excel_bytes(parsed_invoices)
 
         # SINGLE INVOICE ACTIONS
         if len(processed_docs) == 1:
@@ -1144,19 +1148,19 @@ if uploaded_invoices:
                 </div>
             """, unsafe_allow_html=True)
 
-            # DOWNLOAD BUTTONS
+            # DOWNLOAD BUTTONS (USING RAW BYTES TO PREVENT BLANK DOWNLOAD)
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.download_button(
                     label=f"📥 Download Processed PDF",
-                    data=pdf_buf,
+                    data=pdf_buf.getvalue(),
                     file_name=pdf_name,
                     mime="application/pdf"
                 )
             with c2:
                 st.download_button(
                     label=f"📊 Download eInvoice.xlsx (Exact Template)",
-                    data=excel_buffer,
+                    data=excel_raw_bytes,
                     file_name=f"{inv_no}_eInvoice.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
@@ -1192,14 +1196,14 @@ if uploaded_invoices:
             with c1:
                 st.download_button(
                     label=f"📦 Download All Processed PDFs ({len(processed_docs)} Files - ZIP)",
-                    data=zip_buffer,
+                    data=zip_buffer.getvalue(),
                     file_name=f"Invoices_Processed_{date_str}.zip",
                     mime="application/zip"
                 )
             with c2:
                 st.download_button(
                     label=f"📊 Download Bulk eInvoice.xlsx ({len(processed_docs)} Invoices)",
-                    data=excel_buffer,
+                    data=excel_raw_bytes,
                     file_name=f"Bulk_eInvoice_{date_str}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
