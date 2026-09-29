@@ -15,7 +15,7 @@ st.set_page_config(page_title="Universal Operations & e-Invoice Suite", page_ico
 st.markdown("""
     <div style="text-align: center; padding: 15px 0 20px 0;">
         <h2 style="color: #FFFFFF; margin-bottom: 6px;">⚡ Universal All-Invoice Operations Suite</h2>
-        <p style="color: #94a3b8; font-size: 14px;">Official Government e-Invoice Live Preview | NIC Bulk Excel + e-Invoice JSON</p>
+        <p style="color: #94a3b8; font-size: 14px;">Exact Replica of Official eInvoice.xlsm Template + Matching Schema v1.01 JSON</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -62,7 +62,7 @@ def fmt_dec(val):
     except (ValueError, TypeError):
         return "0.00"
 
-def clean_description_completely(desc, hsn_code=None, qty=None, unit_price=None):
+def clean_description_completely(desc, hsn_code=None):
     if not desc:
         return ""
     if hsn_code:
@@ -72,14 +72,6 @@ def clean_description_completely(desc, hsn_code=None, qty=None, unit_price=None)
         desc = re.sub(rf"\b{re.escape(first_digit)}\b", "", desc)
 
     desc = re.sub(r"\b\d{4,8}\b", "", desc)
-
-    if qty:
-        desc = re.sub(rf"\b{re.escape(str(qty))}\b", "", desc)
-    if unit_price:
-        p_str = f"{float(unit_price):.2f}"
-        desc = re.sub(rf"\b{re.escape(p_str)}\b", "", desc)
-        desc = re.sub(rf"\b{re.escape(str(unit_price))}\b", "", desc)
-
     desc = re.sub(r"\b\d+\.\d{2}\b", "", desc)
     desc = re.sub(r"\s+\d$", "", desc)
     desc = re.sub(r"\s+", " ", desc).strip()
@@ -560,7 +552,7 @@ def build_einvoice_json_v101(data):
         }
     }
 
-# ----------------- OFFICIAL NIC v1.01 EXCEL BUILDER (TEXT 2-DECIMAL) -----------------
+# ----------------- 100% REPLICA OF USER's eInvoice.xlsm UTILITY -----------------
 
 def generate_official_nic_v101_excel(data_list):
     wb = openpyxl.Workbook()
@@ -568,13 +560,19 @@ def generate_official_nic_v101_excel(data_list):
     ws.title = "eInvoice"
     ws.views.sheetView[0].showGridLines = True
 
-    sky_blue = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
-    light_blue = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
-    peach = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
-    green = PatternFill(start_color="D8E4BC", end_color="D8E4BC", fill_type="solid")
+    # Color Fills matching User's xlsm template
+    c_supply = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+    c_doc = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
+    c_buyer = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
+    c_disp = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
+    c_ship = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
+    c_item = PatternFill(start_color="D8E4BC", end_color="D8E4BC", fill_type="solid")
+    c_val = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
+    c_export = PatternFill(start_color="F2DCDB", end_color="F2DCDB", fill_type="solid")
+    c_eway = PatternFill(start_color="E6B8B7", end_color="E6B8B7", fill_type="solid")
 
     font_title = Font(name="Arial", size=18, bold=True)
-    font_button = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    font_btn = Font(name="Arial", size=11, bold=True, color="FFFFFF")
     font_sec = Font(name="Arial", size=10, bold=True)
     font_col = Font(name="Arial", size=9, bold=True)
     font_data = Font(name="Arial", size=9)
@@ -586,33 +584,29 @@ def generate_official_nic_v101_excel(data_list):
         bottom=Side(style='thin', color='B0B0B0')
     )
 
-    ws["G1"] = "E-Invoice System"
-    ws["G1"].font = font_title
-    ws["G1"].alignment = Alignment(horizontal="center", vertical="center")
+    # Title Banner (Row 1-2)
+    ws.merge_cells("H1:L2")
+    ws["H1"] = "E-Invoice System"
+    ws["H1"].font = font_title
+    ws["H1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    ws.merge_cells("L1:N2")
-    ws["L1"] = "Validate"
-    ws["L1"].fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-    ws["L1"].font = font_button
-    ws["L1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells("M1:N2")
+    ws["M1"] = "Validate"
+    ws["M1"].fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+    ws["M1"].font = font_btn
+    ws["M1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    ws.merge_cells("P1:R2")
-    ws["P1"] = "Prepare JSON"
-    ws["P1"].fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-    ws["P1"].font = font_button
-    ws["P1"].alignment = Alignment(horizontal="center", vertical="center")
-
-    ws["T2"] = "* Indicates Mandatory Fields"
-    ws["T2"].font = Font(name="Arial", size=8, italic=True, color="555555")
-
+    # Section Headers (Row 3)
     sections = [
-        ("Supply Details", 1, 4, light_blue),
-        ("Document Details", 5, 7, peach),
-        ("Buyer Details", 8, 18, light_blue),
-        ("Dispatch Details", 19, 24, peach),
-        ("Shipping Details", 25, 32, light_blue),
-        ("Item Details", 33, 46, green),
-        ("Invoice Value Details", 47, 52, sky_blue)
+        ("Supply Details", 1, 4, c_supply),
+        ("Document Details", 5, 7, c_doc),
+        ("Buyer Details", 8, 18, c_buyer),
+        ("Dispatch Details", 19, 24, c_disp),
+        ("Shipping Details", 25, 32, c_ship),
+        ("Product Details", 33, 57, c_item),
+        ("Value Details", 61, 70, c_val),
+        ("Export Details", 71, 77, c_export),
+        ("E-way-bill Details", 78, 85, c_eway)
     ]
 
     for name, sc, ec, fill in sections:
@@ -624,35 +618,57 @@ def generate_official_nic_v101_excel(data_list):
         for i in range(sc, ec + 1):
             ws.cell(row=3, column=i).border = thin_border
 
-    columns = [
-        "Supply Type *", "Reverse Charge", "e-Comm GSTIN", "Igst On Intra",
+    # Exact Column Names from Photo (Row 4)
+    # A to CG (Total 85 Columns)
+    col_names = [
+        # Supply Details (1 to 4: A-D)
+        "Supply Type Code *", "Reverse Charge", "e-Comm GSTIN", "Igst On Intra",
+        # Document Details (5 to 7: E-G)
         "Document Type *", "Document Number *", "Document Date (DD/MM/YYYY) *",
-        "Buyer GSTIN *", "Buyer Legal Name *", "Buyer Trade Name", "Buyer POS *", 
-        "Buyer Addr1 *", "Buyer Addr2", "Buyer Location *", "Buyer Pin Code *", 
+        # Buyer Details (8 to 18: H-R)
+        "Buyer GSTIN *", "Buyer Legal Name *", "Buyer Trade Name", "Buyer POS *",
+        "Buyer Addr1 *", "Buyer Addr2", "Buyer Location *", "Buyer Pin Code *",
         "Buyer State *", "Buyer Phone Number", "Buyer Email Id",
+        # Dispatch Details (19 to 24: S-X)
         "Dispatch Name", "Dispatch Addr1", "Dispatch Addr2", "Dispatch Location", "Dispatch Pin Code", "Dispatch State",
+        # Shipping Details (25 to 32: Y-AF)
         "Shipping GSTIN", "Shipping Legal Name", "Shipping Trade Name", "Shipping Addr1", "Shipping Addr2", "Shipping Location", "Shipping Pin Code", "Shipping State",
-        "Sl. No *", "Product Description *", "Is Service *", "HSN Code *", "Quantity *", "Unit *", "Unit Price *", 
-        "Gross Amount", "Taxable Value *", "GST Rate (%) *", "IGST Amount", "CGST Amount", "SGST Amount", "Total Item Value *",
-        "Total Taxable Value *", "Total CGST Amount", "Total SGST Amount", "Total IGST Amount", "Round Off Amount", "Total Invoice Value *"
+        # Product Details (33 to 57: AG-BE)
+        "Sl.No. *", "Product Description", "Is Service *", "HSN Code *", "Quantity *", "Unit *", "Unit Price *",
+        "Gross Amount", "Discount", "Pre Tax Value", "Taxable value *", "GST Rate (%) *", "Sgst Amt(Rs)", "Cgst Amt(Rs)",
+        "Igst Amt(Rs)", "Cess Rate (%)", "Cess Amt Adval (Rs)", "Cess Non Adval Amt (Rs)", "State Cess Rate (%)",
+        "State Cess Adval Amt (Rs)", "State Cess Non-Adval Amt (Rs)", "Other Charges", "Item Total *",
+        "Batch Name", "Batch Expiry Date", "Warranty Date",
+        # Spacer Cols (58 to 60: BF, BG, BH)
+        "", "", "",
+        # Value Details (61 to 70: BI-BR)
+        "Total Taxable value *", "Sgst Amt", "Cgst Amt", "Igst Amt", "Cess Amt", "State Cess Amt", "Discount", "Other charges", "Round off", "Total Invoice value *",
+        # Export Details (71 to 77: BS-BY)
+        "Shipping Bill No", "Shipping Bill Dt", "Port", "Refund claim", "Foreign Currency", "Country Code", "Export Duty Amount",
+        # E-way-bill Details (78 to 85: BZ-CG)
+        "Trans ID", "Trans Name", "Trans Mode", "Distance", "Trans Doc No", "Trans Doc Date", "Vehicle No", "Vehicle Type"
     ]
 
-    for c_idx, col_name in enumerate(columns, 1):
+    for c_idx, col_name in enumerate(col_names, 1):
         cell = ws.cell(row=4, column=c_idx, value=col_name)
         if c_idx <= 4:
-            cell.fill = light_blue
+            cell.fill = c_supply
         elif c_idx <= 7:
-            cell.fill = peach
+            cell.fill = c_doc
         elif c_idx <= 18:
-            cell.fill = light_blue
+            cell.fill = c_buyer
         elif c_idx <= 24:
-            cell.fill = peach
+            cell.fill = c_disp
         elif c_idx <= 32:
-            cell.fill = light_blue
-        elif c_idx <= 46:
-            cell.fill = green
-        else:
-            cell.fill = sky_blue
+            cell.fill = c_ship
+        elif c_idx <= 57:
+            cell.fill = c_item
+        elif 61 <= c_idx <= 70:
+            cell.fill = c_val
+        elif 71 <= c_idx <= 77:
+            cell.fill = c_export
+        elif 78 <= c_idx <= 85:
+            cell.fill = c_eway
         cell.font = font_col
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = thin_border
@@ -663,8 +679,10 @@ def generate_official_nic_v101_excel(data_list):
     for inv in data_list:
         seller_state_code = inv["seller_state_code"]
         buyer_pos = inv["buyer_pos"]
+        pos_str = inv["pos_state_name"].title()
 
         tot_taxable = sum([it["taxable_val"] for it in inv["line_items"]])
+        tot_discount = sum([it.get("discount", 0.0) for it in inv["line_items"]])
         is_interstate = (seller_state_code != buyer_pos)
 
         if is_interstate:
@@ -691,6 +709,7 @@ def generate_official_nic_v101_excel(data_list):
             qty = it["qty"]
             price = it["unit_price"]
             gross_amt = it.get("gross_amt", round(qty * price, 2))
+            disc = it.get("discount", 0.0)
             taxable = it.get("taxable_val", gross_amt)
             gst_rate = it.get("gst_rate", 5.0)
 
@@ -703,28 +722,36 @@ def generate_official_nic_v101_excel(data_list):
                 sgst = round(taxable * (gst_rate / 200), 2)
                 igst = 0.0
 
-            item_val = round(taxable + cgst + sgst + igst, 2)
+            item_tot = round(taxable + cgst + sgst + igst, 2)
 
+            # Build exact 85 Columns Data Row
             row_data = [
-                # Supply Details
+                # Supply Details (A to D)
                 "B2B", "N", "", "N",
-                # Document Details
+                # Document Details (E to G)
                 "Tax Invoice", str(inv["invoice_no"]), str(inv["doc_date"]),
-                # Buyer Details
-                str(inv["buyer_gstin"]), str(inv["buyer_name"]), str(inv["buyer_trade_name"]), str(buyer_pos),
+                # Buyer Details (H to R)
+                str(inv["buyer_gstin"]), str(inv["buyer_name"]), str(inv["buyer_trade_name"]), pos_str,
                 str(inv["buyer_addr1"]), "", str(inv["buyer_loc"]), str(inv["buyer_pin"]),
                 str(inv["buyer_state_name"]), str(inv["buyer_phone"]), str(inv["buyer_email"]),
-                # Dispatch Details (Blank)
+                # Dispatch Details (S to X)
                 "", "", "", "", "", "",
-                # Shipping Details
+                # Shipping Details (Y to AF)
                 *ship_vals,
-                # Item Details
-                str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "BOX")),
-                fmt_dec(price), fmt_dec(gross_amt), fmt_dec(taxable), str(int(gst_rate)),
-                fmt_dec(igst), fmt_dec(cgst), fmt_dec(sgst), fmt_dec(item_val),
-                # Invoice Value Details
-                fmt_dec(tot_taxable), fmt_dec(tot_cgst), fmt_dec(tot_sgst), fmt_dec(tot_igst),
-                fmt_dec(final_inv_val - calc_inv_val), fmt_dec(final_inv_val)
+                # Product Details (AG to BE)
+                str(s_no), str(it["desc"]), "N", str(it["hsn"]), str(qty), str(it.get("unit", "PAC")),
+                fmt_dec(price), fmt_dec(gross_amt), fmt_dec(disc), fmt_dec(gross_amt - disc),
+                fmt_dec(taxable), str(int(gst_rate)), fmt_dec(sgst), fmt_dec(cgst), fmt_dec(igst),
+                "0", "0", "0", "0", "0", "0", "0", fmt_dec(item_tot),
+                "", "", "", # Batch cols
+                "", "", "", # Spacers (BF, BG, BH)
+                # Value Details (BI to BR)
+                fmt_dec(tot_taxable), fmt_dec(tot_sgst), fmt_dec(tot_cgst), fmt_dec(tot_igst),
+                "0.00", "0.00", fmt_dec(tot_discount), "0.00", fmt_dec(final_inv_val - calc_inv_val), fmt_dec(final_inv_val),
+                # Export Details (BS to BY)
+                "", "", "", "", "", "", "",
+                # E-way-bill Details (BZ to CG)
+                "", "", "", "", "", "", "", ""
             ]
 
             for c_idx, val in enumerate(row_data, 1):
@@ -732,20 +759,21 @@ def generate_official_nic_v101_excel(data_list):
                 cell.font = font_data
                 cell.border = thin_border
                 cell.number_format = '@'
-                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 25, 31, 32, 33, 35, 36, 38, 42]:
+                if c_idx in [1, 2, 4, 5, 7, 8, 11, 15, 16, 17, 25, 31, 32, 33, 35, 36, 38, 44]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
-                elif c_idx in [37, 39, 40, 41, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]:
+                elif c_idx in [37, 39, 40, 41, 42, 43, 45, 46, 47, 55, 61, 62, 63, 64, 67, 69, 70]:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
 
             curr_row += 1
 
+    # Exact Bottom Sheet Tabs matching User's XLSM
     tabs = ["Welcome", "Profile", "Master Codes", "Sample Invoice", "Format A,B,C,D", "Schema", "Validation", "Calculations", "FAQs"]
     for t in tabs:
         d_ws = wb.create_sheet(title=t)
         d_ws.sheet_view.showGridLines = True
-        d_ws["A1"] = f"{t} - NIC e-Invoice Offline Utility v1.01"
+        d_ws["A1"] = f"{t} - Official e-Invoice System Utility"
         d_ws["A1"].font = Font(size=14, bold=True, color="1F497D")
 
     for col in ws.columns:
@@ -1075,9 +1103,9 @@ if uploaded_invoices:
                 )
             with c2:
                 st.download_button(
-                    label=f"📊 Download NIC Bulk Excel (v1.01)",
+                    label=f"📊 Download eInvoice.xlsx (Exact Template)",
                     data=excel_buffer,
-                    file_name=f"{inv_no}_NIC_v1.01.xlsx",
+                    file_name=f"{inv_no}_eInvoice.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             with c3:
@@ -1088,11 +1116,11 @@ if uploaded_invoices:
                     mime="application/json"
                 )
 
-            # LIVE GOVERNMENT FORMAT PREVIEW (RENDERED CLEANLY)
+            # LIVE GOVERNMENT FORMAT PREVIEW (RENDERED VIA IFRAME COMPONENT)
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("### 📄 Official Government e-Invoice Live Preview")
             
-            calc_height = 580 + (len(meta['line_items']) * 38)
+            calc_height = 560 + (len(meta['line_items']) * 36)
             preview_html = render_exact_government_einvoice_preview(meta)
             components.html(preview_html, height=calc_height, scrolling=True)
 
@@ -1118,9 +1146,9 @@ if uploaded_invoices:
                 )
             with c2:
                 st.download_button(
-                    label=f"📊 Download Bulk NIC Excel v1.01 ({len(processed_docs)} Invoices)",
+                    label=f"📊 Download Bulk eInvoice.xlsx ({len(processed_docs)} Invoices)",
                     data=excel_buffer,
-                    file_name=f"Bulk_NIC_v1.01_{date_str}.xlsx",
+                    file_name=f"Bulk_eInvoice_{date_str}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             with c3:
@@ -1137,6 +1165,6 @@ if uploaded_invoices:
             for i, tab in enumerate(preview_tabs):
                 with tab:
                     curr_meta = processed_docs[i]['meta']
-                    calc_height = 580 + (len(curr_meta['line_items']) * 38)
+                    calc_height = 560 + (len(curr_meta['line_items']) * 36)
                     p_html = render_exact_government_einvoice_preview(curr_meta)
                     components.html(p_html, height=calc_height, scrolling=True)
